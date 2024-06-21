@@ -63,7 +63,7 @@ if __name__ == "__main__":
         "device": "cuda:0",
         "epochs": 10,
         "batch_size": 16,
-        "lr":  0.001,#[0.001, 0.0001],
+        "lr": 0.001, #[0.001, 0.0001],
         "load_from_checkpoint":  True,
         "checkpoint_dir": "experiments/fastmri_test/checkpoints",
         "checkpoint_every": 1,
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     path = '/home/aa/data/bsbcm'
     dataset = BSBCMDataset(path, num_instances='all', normalize=wandb.config["output_normalization"])
   elif wandb.config["dataset"] == "fastmri":
-    path = '/project2/rina/lekunbillwang/im2im-uq/core/datasets/bill_test_fastmri/singlecoil_test' # singlecoil_val
+    path = '/project2/rina/lekunbillwang/im2im-uq/core/datasets/bill_test_fastmri/singlecoil_val'#singlecoil_test' # singlecoil_val
     mask_info = {'type': 'equispaced', 'center_fraction' : [0.08], 'acceleration' : [4]}
     dataset = FastMRIDataset(path, normalize_input=wandb.config["input_normalization"], normalize_output = wandb.config["output_normalization"], mask_info=mask_info)
     dataset = normalize_dataset(dataset)

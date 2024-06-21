@@ -226,7 +226,7 @@ def train_net(net,
     if torch.cuda.device_count() > 1:
       print("Let's use", torch.cuda.device_count(), "GPUs!")
     #  # dim = 0 [30, xxx] -> [10, ...], [10, ...], [10, ...] on 3 GPUs
-      net = DataParallelPassthrough(net) # If you only want to train on two GPUs, add device_ids=[0,1]
+      net = DataParallelPassthrough(net,device_ids=[0,1]) # If you only want to train on two GPUs, add device_ids=[0,1]
 
     print("DataParallel!")
     net = net.to(device=device)
@@ -235,48 +235,6 @@ def train_net(net,
 
     # WandB magic
     print("WandB Magic!")
-    config = { # manually added config just in case
-    "program": "core/scripts/router.py",
-    "method": "grid",
-    "metric": {
-        "goal": "minimize",
-        "name": "mean_size"
-    },
-    "name": "fastmri_test",
-    "project": "fastmri_test",
-    "parameters": {
-        "group": "fastmri_test",
-        "output_dir": "experiments/fastmri_test/outputs/raw",
-        "dataset": "fastmri",
-        "num_inputs":1,
-        "data_split_percentages": [0.8, 0.1, 0.1, 0.0],
-        "model": "UNet",
-        "uncertainty_type": "quantiles",#["gaussian", "residual_magnitude", "softmax", "quantiles"],
-        "alpha":0.1,
-        "delta": 0.1,
-        "num_lambdas": 1000,
-        "rcps_loss":  "fraction_missed",
-        "minimum_lambda_softmax": 0,
-        "maximum_lambda_softmax":  1.2,
-        "minimum_lambda": 0,
-        "maximum_lambda": 6,
-        "device": "cuda:0",
-        "epochs": 10,
-        "batch_size": 78,
-        "lr":  [0.001, 0.0001],
-        "load_from_checkpoint":  True,
-        "checkpoint_dir": "experiments/fastmri_test/checkpoints",
-        "checkpoint_every": 1,
-        "validate_every": 10,
-        "num_validation_images":10,
-        "q_lo": 0.05,
-        "q_hi": 0.95,
-        "q_lo_weight":  1,
-        "q_hi_weight": 1,
-        "mse_weight": 1,
-        "num_softmax": 50,
-        "input_normalization": "standard",
-        "output_normalization":  "min-max"}}
     if starting_epoch == 0:
       try:
         wandb.watch(net, log_freq = 100)
@@ -302,6 +260,7 @@ def train_net(net,
         num_examples = 0
         for batch in tqdm(train_loader):
             labels = batch[-1].to(device=device)
+            print(labels.shape)
             x = tuple([batch[i].to(device=device, dtype=torch.float32) for i in range(len(batch)-1)])
 
             # Predict
