@@ -1,5 +1,7 @@
 import os, sys, inspect
 sys.path.insert(1, os.path.join(sys.path[0], '../../'))
+#os.environ["WANDB_MODE"]="offline"
+#os.environ["WANDB__SERVICE_WAIT"] = "300"
 import wandb
 import random
 import copy
@@ -12,7 +14,8 @@ import torchvision.transforms as T
 import warnings
 import yaml
 
-from core.scripts.train import train_net
+#from core.scripts.train import train_net
+from core.scripts.train_mri_offline import train_net
 from core.scripts.eval import get_images, eval_net, get_loss_table, eval_set_metrics 
 from core.models.add_uncertainty import add_uncertainty
 from core.calibration.calibrate_model import calibrate_model
@@ -33,11 +36,59 @@ if __name__ == "__main__":
   warnings.filterwarnings("ignore")
 
   print("Entered main method.")
-  wandb.init() 
+  config = {
+    "program": "core/scripts/router.py",
+    "method": "grid",
+    "metric": {
+        "goal": "minimize",
+        "name": "mean_size"
+    },
+    "name": "fastmri_test",
+    "project": "fastmri_test",
+    "group": "fastmri_test",
+    "output_dir": "experiments/fastmri_test/outputs/raw",
+    "dataset": "fastmri",
+    "num_inputs":1,
+        "data_split_percentages": [0.8, 0.1, 0.1, 0.0],
+        "model": "UNet",
+        "uncertainty_type": "quantiles",#["gaussian", "residual_magnitude", "softmax", "quantiles"],
+        "alpha":0.1,
+        "delta": 0.1,
+        "num_lambdas": 1000,
+        "rcps_loss":  "fraction_missed",
+        "minimum_lambda_softmax": 0,
+        "maximum_lambda_softmax":  1.2,
+        "minimum_lambda": 0,
+        "maximum_lambda": 6,
+        "device": "cuda:0",
+        "epochs": 10,
+        "batch_size": 16,
+        "lr":  0.001,#[0.001, 0.0001],
+        "load_from_checkpoint":  True,
+        "checkpoint_dir": "experiments/fastmri_test/checkpoints",
+        "checkpoint_every": 1,
+        "validate_every": 10,
+        "num_validation_images":10,
+        "q_lo": 0.05,
+        "q_hi": 0.95,
+        "q_lo_weight":  1,
+        "q_hi_weight": 1,
+        "mse_weight": 1,
+        "num_softmax": 50,
+        "input_normalization": "standard",
+        "output_normalization":  "min-max"}
+  wandb.init(mode="offline",config=config) 
   print("wandb init.")
   # Check if results exist already
   output_dir = wandb.config['output_dir'] 
-  results_fname = output_dir + f'/results_' + wandb.config['dataset'] + "_" + wandb.config['uncertainty_type'] + "_" + str(wandb.config['batch_size']) + "_" + str(wandb.config['lr']) + "_" + wandb.config['input_normalization'] + "_" + wandb.config['output_normalization'].replace('.','_') + '.pkl'
+  #results_fname = output_dir + f'/results_' + wandb.config['dataset'] + "_" + wandb.config['uncertainty_type'] + "_" + str(wandb.config['batch_size']) + "_" + str(wandb.config['lr']) +"_" + wandb.config['input_normalization'] + "_" + wandb.config['output_normalization'].replace('.','_') + '.pkl'
+  results_fname = (f"{output_dir}/results_{wandb.config['dataset']}_"
+                 f"{wandb.config['uncertainty_type']}_"
+                 f"{wandb.config['batch_size']}_"
+                 f"{wandb.config['lr']}_"
+                 f"{wandb.config['input_normalization']}_"
+                 f"{wandb.config['output_normalization'].replace('.', '_')}.pkl")
+
   if os.path.exists(results_fname):
     print(f"Results already precomputed and stored in {results_fname}!")
     os._exit(os.EX_OK) 
@@ -64,7 +115,7 @@ if __name__ == "__main__":
     path = '/home/aa/data/bsbcm'
     dataset = BSBCMDataset(path, num_instances='all', normalize=wandb.config["output_normalization"])
   elif wandb.config["dataset"] == "fastmri":
-    path = '~/data/singlecoil_train'
+    path = '/project2/rina/lekunbillwang/im2im-uq/core/datasets/bill_test_fastmri/singlecoil_test' # singlecoil_val
     mask_info = {'type': 'equispaced', 'center_fraction' : [0.08], 'acceleration' : [4]}
     dataset = FastMRIDataset(path, normalize_input=wandb.config["input_normalization"], normalize_output = wandb.config["output_normalization"], mask_info=mask_info)
     dataset = normalize_dataset(dataset)
@@ -103,6 +154,8 @@ if __name__ == "__main__":
     lengths[-1] = len(dataset)-(lengths.sum()-lengths[-1])
     train_dataset, calib_dataset, val_dataset, _ = torch.utils.data.random_split(dataset, lengths.tolist()) 
   
+
+
   model = train_net(model,
                     train_dataset,
                     val_dataset,

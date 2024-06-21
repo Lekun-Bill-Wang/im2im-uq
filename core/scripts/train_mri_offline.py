@@ -20,6 +20,119 @@ import core.utils as utils
 import pdb
 import dill as pkl
 
+config = {
+    "program": "core/scripts/router.py",
+    "method": "grid",
+    "metric": {
+        "goal": "minimize",
+        "name": "mean_size"
+    },
+    "name": "fastmri_test",
+    "project": "fastmri_test",
+    "parameters": {
+        "group": {
+            "value": "fastmri_test"
+        },
+        "output_dir": {
+            "value": "experiments/fastmri_test/outputs/raw"
+        },
+        "dataset": {
+            "value": "fastmri"
+        },
+        "num_inputs": {
+            "value": 1
+        },
+        "data_split_percentages": {
+            "value": [0.8, 0.1, 0.1, 0.0]
+        },
+        "model": {
+            "value": "UNet"
+        },
+        "uncertainty_type": {
+            "values": ["gaussian", "residual_magnitude", "softmax", "quantiles"]
+        },
+        "alpha": {
+            "value": 0.1
+        },
+        "delta": {
+            "value": 0.1
+        },
+        "num_lambdas": {
+            "value": 1000
+        },
+        "rcps_loss": {
+            "value": "fraction_missed"
+        },
+        "minimum_lambda_softmax": {
+            "value": 0
+        },
+        "maximum_lambda_softmax": {
+            "value": 1.2
+        },
+        "minimum_lambda": {
+            "value": 0
+        },
+        "maximum_lambda": {
+            "value": 6
+        },
+        "device": {
+            "value": "cuda:0"
+        },
+        "epochs": {
+            "value": 10
+        },
+        "batch_size": {
+            "value": 78
+        },
+        "lr": {
+            "values": [0.001, 0.0001]
+        },
+        "load_from_checkpoint": {
+            "value": True
+        },
+        "checkpoint_dir": {
+            "value": "experiments/fastmri_test/checkpoints"
+        },
+        "checkpoint_every": {
+            "value": 1
+        },
+        "validate_every": {
+            "value": 10
+        },
+        "num_validation_images": {
+            "value": 10
+        },
+        "q_lo": {
+            "value": 0.05
+        },
+        "q_hi": {
+            "value": 0.95
+        },
+        "q_lo_weight": {
+            "value": 1
+        },
+        "q_hi_weight": {
+            "value": 1
+        },
+        "mse_weight": {
+            "value": 1
+        },
+        "num_softmax": {
+            "value": 50
+        },
+        "input_normalization": {
+            "value": "standard"
+        },
+        "output_normalization": {
+            "value": "min-max"
+        }
+    }
+}
+
+
+
+
+
 class DataParallelPassthrough(nn.DataParallel):
   def __getattr__(self, name):
     try:
@@ -71,8 +184,8 @@ def train_net(net,
               checkpoint_dir,
               checkpoint_every,
               validate_every,
-              config=None): # config not normally needed due to wandb
-
+              config=None): 
+    
     # MODEL LOADING CODE
     starting_epoch = 0 # will change if loading from checkpoint
     if config == None:
@@ -122,6 +235,48 @@ def train_net(net,
 
     # WandB magic
     print("WandB Magic!")
+    config = { # manually added config just in case
+    "program": "core/scripts/router.py",
+    "method": "grid",
+    "metric": {
+        "goal": "minimize",
+        "name": "mean_size"
+    },
+    "name": "fastmri_test",
+    "project": "fastmri_test",
+    "parameters": {
+        "group": "fastmri_test",
+        "output_dir": "experiments/fastmri_test/outputs/raw",
+        "dataset": "fastmri",
+        "num_inputs":1,
+        "data_split_percentages": [0.8, 0.1, 0.1, 0.0],
+        "model": "UNet",
+        "uncertainty_type": "quantiles",#["gaussian", "residual_magnitude", "softmax", "quantiles"],
+        "alpha":0.1,
+        "delta": 0.1,
+        "num_lambdas": 1000,
+        "rcps_loss":  "fraction_missed",
+        "minimum_lambda_softmax": 0,
+        "maximum_lambda_softmax":  1.2,
+        "minimum_lambda": 0,
+        "maximum_lambda": 6,
+        "device": "cuda:0",
+        "epochs": 10,
+        "batch_size": 78,
+        "lr":  [0.001, 0.0001],
+        "load_from_checkpoint":  True,
+        "checkpoint_dir": "experiments/fastmri_test/checkpoints",
+        "checkpoint_every": 1,
+        "validate_every": 10,
+        "num_validation_images":10,
+        "q_lo": 0.05,
+        "q_hi": 0.95,
+        "q_lo_weight":  1,
+        "q_hi_weight": 1,
+        "mse_weight": 1,
+        "num_softmax": 50,
+        "input_normalization": "standard",
+        "output_normalization":  "min-max"}}
     if starting_epoch == 0:
       try:
         wandb.watch(net, log_freq = 100)

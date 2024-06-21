@@ -23,7 +23,7 @@ import wandb
 
 if __name__ == "__main__":
     fix_randomness()
-    wandb.init()
+    wandb.init(mode="offline")
     dir_path = os.path.dirname(os.path.realpath(__file__))
     with open(dir_path + '/config.yml') as file:
       config = yaml.safe_load(file)
