@@ -260,7 +260,7 @@ def train_net(net,
         num_examples = 0
         for batch in tqdm(train_loader):
             labels = batch[-1].to(device=device)
-            print(labels.shape)
+            #(labels.shape)
             x = tuple([batch[i].to(device=device, dtype=torch.float32) for i in range(len(batch)-1)])
 
             # Predict

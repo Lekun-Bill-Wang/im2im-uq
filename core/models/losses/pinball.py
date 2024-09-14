@@ -10,8 +10,8 @@ class PinballLoss():
       self.reduction = reduction
 
   def __call__(self, output, target):
-      print(output.shape)
-      print(target.shape)
+      #print(output.shape)
+      #print(target.shape)
       assert output.shape == target.shape
       loss = torch.zeros_like(target, dtype=torch.float)
       error = output - target
