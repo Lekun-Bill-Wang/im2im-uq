@@ -4,6 +4,8 @@ experiments/temca_test/checkpoints/
 experiments/bsbcm_test/outputs/
 experiments/fastmri_test/outputs/
 experiments/temca_test/outputs/
+# Loaded dataset
+core/datasets/bill_test_fastmri/
 # Any pytorch model
 *.pth
 # Weights and Biases

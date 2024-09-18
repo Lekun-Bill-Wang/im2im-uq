@@ -1,0 +1,50 @@
+wandb: Tracking run with wandb version 0.16.5
+wandb: W&B syncing is set to `offline` in this directory.  
+wandb: Run `wandb online` or set WANDB_MODE=online to enable cloud syncing.
+wandb: WARNING Calling wandb.run.save without any arguments is deprecated.Changes to attributes are automatically persisted.
+  0%|          | 0/2 [00:00<?, ?it/s] 50%|█████     | 1/2 [00:03<00:03,  3.40s/it]100%|██████████| 2/2 [00:06<00:00,  3.39s/it]100%|██████████| 2/2 [00:06<00:00,  3.38s/it]
+wandb: You can sync this run to the cloud by running:
+wandb: wandb sync /project2/rina/lekunbillwang/im2im-uq/wandb/offline-run-20240917_030216-kmtlr7nj
+wandb: Find logs at: ./wandb/offline-run-20240917_030216-kmtlr7nj/logs
+joblib.externals.loky.process_executor._RemoteTraceback: 
+"""
+Traceback (most recent call last):
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/externals/loky/process_executor.py", line 463, in _process_worker
+    r = call_item()
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/externals/loky/process_executor.py", line 291, in __call__
+    return self.fn(*self.args, **self.kwargs)
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 590, in __call__
+    for func, args, kwargs in self.items]
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 590, in <listcomp>
+    for func, args, kwargs in self.items]
+  File "/project2/rina/lekunbillwang/im2im-uq/core/scripts/../../core/scripts/eval.py", line 51, in process_pixel
+    randomize=False
+  File "/project2/rina/lekunbillwang/im2im-uq/core/scripts/../../core/condconf.py", line 297, in predict
+    lower, upper = binary_search(_solve, S_min, S_max * 2)
+  File "/project2/rina/lekunbillwang/im2im-uq/core/scripts/../../core/condconf.py", line 616, in binary_search
+    if func(mid) > 0:
+  File "/project2/rina/lekunbillwang/im2im-uq/core/scripts/../../core/condconf.py", line 664, in _solve_dual
+    return weights[-1] - threshold
+TypeError: 'NoneType' object is not subscriptable
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "core/scripts/router.py", line 282, in <module>
+    raw_images_dict = get_images_condConf_parallel(model,val_dataset,wandb.config['device'],list(range(wandb.config['num_val_img'])),params,lambdas,condConf)
+  File "/project2/rina/lekunbillwang/im2im-uq/core/scripts/../../core/scripts/eval.py", line 116, in get_images_condConf_parallel
+    ) for pixel_idx in range(length))
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 1952, in __call__
+    return output if self.return_generator else list(output)
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 1595, in _get_outputs
+    yield from self._retrieve()
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 1699, in _retrieve
+    self._raise_error_fast()
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 1734, in _raise_error_fast
+    error_job.get_result(self.timeout)
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 736, in get_result
+    return self._return_or_raise()
+  File "/home/lekunbillwang/.conda/envs/im2im-uq/lib/python3.7/site-packages/joblib/parallel.py", line 754, in _return_or_raise
+    raise self._result
+TypeError: 'NoneType' object is not subscriptable

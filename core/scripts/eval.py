@@ -8,8 +8,13 @@ import matplotlib.pyplot as plt
 from torch.utils.data import TensorDataset, DataLoader
 from core.calibration.calibrate_model import get_rcps_loss_fn, get_rcps_metrics_from_outputs
 from core.utils import standard_to_minmax
+
+from core.calibration.calibrate_model_new import vectorize, tensorize, create_nonconformity_score_fns_modified, generate_linear_phi_components,get_center_window
+from core.condconf import CondConf
 import wandb
 import pdb
+
+from joblib import Parallel, delayed
 
 def transform_output(x,self_normalize=True):
   if self_normalize:
@@ -21,6 +26,327 @@ def transform_output(x,self_normalize=True):
     x = x.permute(1,2,0)
   return x.numpy().astype(np.uint8)
 
+
+def process_pixel(model,
+                  condConf,
+                  config, 
+                  lambdas, 
+                  window_size, 
+                  device, 
+                  val_dataset_i, 
+                  pixel_idx, 
+                  x_vec):
+    model = model.to(device)
+    input_pixel = x_vec[pixel_idx,:].reshape(-1, 3)
+    # Create inverse score function for the current pixel
+    #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
+    _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model, val_dataset_i, window_size, device, lambdas, pixel_idx)
+
+    # Generate the CondConf prediction set
+    condConf_pset = condConf.predict(
+        quantile=config['alpha'], 
+        x_test=input_pixel, 
+        score_inv_fn=nonconformity_score_inv_fn_modified, 
+        exact=False, 
+        randomize=False
+    )
+
+    # save CUDA memory
+    del model
+    torch.cuda.empty_cache() 
+    return condConf_pset[0], condConf_pset[1]
+
+
+def get_images_condConf_parallel(model, 
+                                val_dataset, 
+                                device, 
+                                idx_iterator, 
+                                config, 
+                                lambdas, 
+                                condConf):
+    # parallelized version of get_images_condConf() to speed up
+    print(f"Entered condConf pset generation for validation set.")
+    with torch.no_grad():
+        model = model.to(device)
+        window_size = config["val_center_window_size"]
+        variance_nbhd_size = config["var_window_size"]
+        if model.lhat == None:
+          if config["uncertainty_type"] != "softmax":
+            lam = 1.0
+          else:
+            lam = 0.99
+
+        try:
+            # If dataset is iterable, create a list of outputs
+            my_iter = iter(val_dataset)
+            print(f"Number of val images is: {idx_iterator}")
+            val_dataset = [next(my_iter) for img_idx in idx_iterator]
+        except:
+            pass
+
+        num_val_images = len(val_dataset)
+        print("    Generate val set for condConf.")
+        x_test = torch.stack([data[0] for data in val_dataset])
+        x_test = generate_linear_phi_components(x_test, window_size, variance_nbhd_size)
+        y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1], window_size)) for i in range(len(val_dataset))])
+
+        condConf_psets = []
+        examples_output = []
+        all_variances = []  # To store local pixel intensity variances
+ 
+
+        print("    Computing condConf psets for val set.")
+        length = window_size ** 2# number of pixels in the current image
+
+        # Loop through validation dataset
+        for img_idx in idx_iterator:
+            print(f"    Compute pset for the {img_idx+1}-th val image")
+            start_idx = img_idx * length 
+            end_idx = start_idx + length
+            x_vec = x_test[start_idx:end_idx, :] # get the phi components for the (img_idx)-th input image
+            # get variances
+            variances = x_vec[:,1]
+            variances = tensorize(variances, 1, window_size, window_size)
+            # get (img_idx)-th validation image
+            val_dataset_i = val_dataset[img_idx]
+
+            # Parallelize the pixel processing
+            results = Parallel(n_jobs=4)(delayed(process_pixel)(
+                model, condConf, config, lambdas, window_size, device, val_dataset_i, pixel_idx, x_vec
+            ) for pixel_idx in range(length))
+
+            all_lower_bounds, all_upper_bounds = zip(*results) # "*" unpacks the list results, and zip() combines elements from each tuple at corresponding positions
+
+            # Tensorize the condConf prediction set to image forms
+            condConf_pset_lower = np.concatenate(all_lower_bounds)
+            condConf_pset_upper = np.concatenate(all_upper_bounds)
+            condConf_lower_bound = tensorize(condConf_pset_lower, 1, window_size, window_size)
+            condConf_upper_bound = tensorize(condConf_pset_upper, 1, window_size, window_size)
+
+            # Get model's prediction on the downsampled input
+            x_full = val_dataset[img_idx][0].unsqueeze(0).to(device)
+            model_prediction = model(x_full)[:,1,:,:,:]  # Get model prediction
+
+            # Apply the get_center_window function to the model prediction
+            example_output = get_center_window(model_prediction.squeeze(), window_size)
+           
+            # Combine the lower, middle, and upper predictions into a single tensor
+            combined_output = torch.stack([condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()], dim=0)
+            examples_output.append(combined_output)
+            all_variances.append(variances.cpu().numpy())
+        
+        examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
+        examples_variance = [torch.tensor(v) for v in all_variances]# Stack the variances into a list of tensors like `examples_output`
+        examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
+        inputs = [val_dataset[img_idx][0][0] if val_dataset[0][0].shape[0] > 1 else val_dataset[img_idx][0] for img_idx in idx_iterator]
+
+        raw_images_dict = {
+            'inputs': inputs,
+            'gt': examples_gt,
+            'predictions': [example[1] for example in examples_output],
+            'condConf_lower_edge': [example[0] for example in examples_output],
+            'condConf_upper_edge': [example[2] for example in examples_output],
+            'variances': examples_variance  # Saving the variances
+        }
+
+        try:
+            val_dataset.reset()
+        except:
+            pass
+
+        return raw_images_dict
+
+
+
+
+def get_images_condConf(model,
+                        val_dataset,
+                        device, 
+                        idx_iterator,  
+                        config, 
+                        lambdas, 
+                        condConf):
+  print(f"Entered condConf pset generation for val set.")
+  with torch.no_grad():
+    model = model.to(device)
+    window_size = config["val_center_window_size"]
+    variance_nbhd_size = config["var_window_size"]
+    lam = None
+    if model.lhat == None:
+      if config["uncertainty_type"] != "softmax":
+        lam = 1.0
+      else:
+        lam = 0.99
+
+    try:
+      # If dataset is iterable, create a list of outputs
+      my_iter = iter(val_dataset)
+      print(f"Number of val images is: {len(idx_iterator)}")
+      val_dataset = [next(my_iter) for img_idx in idx_iterator]
+    except:
+      pass
+
+    # From the condConf object built on the calib set and form prediction sets of each 
+    # image in the validation set (after vectorizing), and then tensorizing the prediction sets
+    # back to the form like examples_output, make sure the result can be used the same as examples_output below
+    
+    # for each (x,label) in val_dataset, vectorize x, then generate the condConf prediction set using 
+    # condConf_pset = condConf.predict(res = cond_conf.predict(alpha / 2, x, nonconformity_score_inv_fn, exact=True, randomize=True)
+    # where condConf_pset[0], condConf_pset[1] will contain lower and upper bounds of the predidction sets, each of the same length as x.
+    # Also, get the model's prediction on x (using model.nested_sets with lam=1, see examples_output below) and take the middle slice.
+
+    # After you get condConf_pset for each data point, reshape it into a 3 * I * J tensor so that
+    # condConf_pset[0] is lower bound, condConf_pset[1] is model's prediction, and condConf_pset[2] is upper bound
+
+    # At the end, connect all tensors into a (num_val_images, 3 ,I ,J) tensor where num_val_images is 
+    # the length of the validation set, and unsqueeze(0) to make sure this final tensor is 5-way as in 
+    # the output of nested_sets (as our images are grayscale not RGB), and 
+
+
+    # ORIGINAL (no condConf) VERSION: examples_output = [model.nested_sets((val_dataset[img_idx][0].unsqueeze(0).to(device),),lam=lam) for img_idx in idx_iterator]
+    # unsqueeze since nested_sets expects and outputs 5-way tensor (first way being RGB, here we don't have that)
+    
+    # obtain nonconformity score functions
+    #I, J = val_dataset[0][0].shape[-2], val_dataset[0][0].shape[-1] # get image sizes
+    num_val_images = len(val_dataset)
+    print("    Generate val set for condConf.")
+    x_test = torch.stack([data[0] for data in val_dataset])
+    x_test = generate_linear_phi_components(x_test, window_size, variance_nbhd_size)
+    y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1],window_size)) for i in range(len(val_dataset))])
+
+
+    condConf_psets = []
+    examples_output = []
+
+
+    print("    Computing condConf psets for val set.")
+    # Loop through validation dataset
+    for img_idx in idx_iterator:
+      print(f"    Compute pset for the {img_idx+1}-th val image")
+      length = window_size ** 2
+      start_idx = img_idx * length
+      end_idx = start_idx + length
+      x_vec = x_test[start_idx:end_idx,:]
+      print(f"        Shape of the the {img_idx+1}-th val x_test: {x_vec.shape}")
+
+      #labels = val_dataset[img_idx][1].unsqueeze(0).to(device)  # Ground truth label
+            
+      
+      #x_vec = vectorize(x)
+
+      # Generate the CondConf prediction set
+      val_dataset_i = val_dataset[img_idx]
+      
+      # print(f"        Shape of the the {img_idx+1}-th data point in val_dataset: {(val_dataset_i[0].shape,val_dataset_i[1].shape)}")
+      
+      # Initialize lists for CondConf prediction sets and model predictions
+      
+
+      all_lower_bounds = []
+      all_upper_bounds = []
+      # loop through the current window's pixels
+      for pixel_idx in tqdm(range(length)): 
+        # Note that condConf.predict() can onl take ONE test point, so in our case, just one pixel, 
+        # so this inner loop through each pixels of the current val image is needed.
+        input_pixel = x_vec[pixel_idx,:].reshape(-1,3)
+        #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
+        _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model, val_dataset_i, window_size,  device, lambdas, pixel_idx)
+        #print(f"            Compute condConf pset for {pixel_idx+1}-th pixel.")
+
+        
+        condConf_pset = condConf.predict(quantile=config['alpha'], x_test=input_pixel, 
+                                             score_inv_fn=nonconformity_score_inv_fn_modified, 
+                                             exact=False, randomize=False)
+                                             
+        all_lower_bounds.append(condConf_pset[0])
+        all_upper_bounds.append(condConf_pset[1])
+
+      
+
+      # Tensorize the condConf prediction set to image forms
+      condConf_pset_lower =  np.concatenate(all_lower_bounds)
+      condConf_pset_upper =  np.concatenate(all_upper_bounds)
+      # def tensorize(vector, num_images, channels=None, I=None, J=None):
+      condConf_lower_bound = tensorize(condConf_pset_lower, 1, window_size, window_size)
+      condConf_upper_bound = tensorize(condConf_pset_upper, 1, window_size, window_size)
+      #print(f"        Shape of condconf lower bound: {condConf_lower_bound.shape}")
+            
+      # Get model's prediction on the original image using nested_sets
+      x_full = val_dataset[img_idx][0].unsqueeze(0).to(device)  # Image
+      #example_output = model.nested_sets(x_full.unsqueeze(0), lam=1) # model.nested_sets(x_full, lam=1)
+      #model_prediction = example_output[:,1,:,:,:]  # The middle slice 
+   
+      
+
+
+      model_prediction = model(x_full)[1] # can also be model.nested_sets(x_full.unsqueeze(0), lam=1) since nested_sets() performs prediction inside
+
+      # Now apply the get_center_window function to the model prediction
+      example_output = get_center_window(model_prediction.squeeze(), window_size)
+      # Combine the lower, middle, and upper predictions into a single tensor
+      combined_output = torch.stack([condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()], dim=0)
+
+      # Append the tensor to the list
+      #condConf_psets.append(combined_output)
+      #examples_output.append(example_output)
+
+      examples_output.append(combined_output)
+
+    # Stack all prediction sets into a single tensor for easy processing
+    #condConf_psets = torch.stack(condConf_psets).unsqueeze(1)  # 5D tensor
+    examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
+      
+
+
+
+    
+    # adjust for center_window cropping
+    examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
+    if val_dataset[0][0].shape[0] > 1:
+      inputs = [val_dataset[img_idx][0][0] for img_idx in idx_iterator]
+    else:
+      inputs = [val_dataset[img_idx][0] for img_idx in idx_iterator]
+    raw_images_dict = {'inputs': inputs, 
+                       'gt': examples_gt,
+                       'predictions': [example[1] for example in examples_output], 
+                       'condConf_lower_edge': [example[0] for example in examples_output], 
+                       'condConf_upper_edge': [example[2] for example in examples_output] 
+                      }
+
+    # if val_dataset[0][0].shape[0] > 1:
+    #   examples_input = [wandb.Image(transform_output(val_dataset[img_idx][0][0])) for img_idx in idx_iterator]
+    # else:
+    #   examples_input = [wandb.Image(transform_output(val_dataset[img_idx][0])) for img_idx in idx_iterator]
+    #test_img = transform_output(examples_output[0])
+    #print(f"Shape of test_img into wandb.Image(): {test_img.shape}")
+
+    # # disable computation for wandb
+    # examples_lower_edge = [wandb.Image(transform_output(example[0])) for example in examples_output]
+    # examples_prediction = [wandb.Image(transform_output(example[1])) for example in examples_output]
+    # examples_upper_edge = [wandb.Image(transform_output(example[2])) for example in examples_output]
+    # examples_ground_truth = [wandb.Image(transform_output(val_dataset[img_idx][1])) for img_idx in idx_iterator]
+
+    # # Calculate lengths on their own scales
+    # lower_lengths = [example[1]-example[0] for example in examples_output]
+    # lower_lengths = [transform_output(lower_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()), self_normalize=False) for i in range(len(examples_output))]
+    # #lower_lengths = [lower_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()) for i in range(len(examples_output))]
+    # upper_lengths = [example[2]-example[1] for example in examples_output]
+    # upper_lengths = [transform_output(upper_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()), self_normalize=False) for i in range(len(examples_output))]
+    # #upper_lengths = [upper_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()) for i in range(len(examples_output))]
+
+    # examples_lower_length = [wandb.Image(ll) for ll in lower_lengths]
+    # examples_upper_length = [wandb.Image(ul) for ul in upper_lengths]
+
+    try:
+      val_dataset.reset()
+    except:
+      pass
+
+    return raw_images_dict
+
+
+
+
 def get_images(model,
                val_dataset,
                device,
@@ -28,7 +354,7 @@ def get_images(model,
                config):
   with torch.no_grad():
     model = model.to(device)
-
+    window_size = config["val_center_window_size"]
     lam = None
     if model.lhat == None:
       if config["uncertainty_type"] != "softmax":
@@ -43,17 +369,31 @@ def get_images(model,
     except:
       pass
 
-    examples_output = [model.nested_sets((val_dataset[img_idx][0].unsqueeze(0).to(device),),lam=lam) for img_idx in idx_iterator]
+
+    examples_output = []
+    for img_idx in idx_iterator:
+      CP_lb, model_pred, CP_ub = model.nested_sets((val_dataset[img_idx][0].unsqueeze(0).to(device),),lam=lam) # lam = 1 or 0.99 because nested_sets() will use lhat which is tuned by CP, and 1*lhat = lhat.
+      
+      CP_lb = get_center_window(CP_lb.squeeze(),window_size)
+      model_pred = get_center_window(model_pred.squeeze(),window_size)
+      CP_ub = get_center_window(CP_ub.squeeze(),window_size)
+      combined_output = torch.stack([CP_lb.cpu(), model_pred.cpu(), CP_ub.cpu()], dim=0)
+
+      # Append the tensor to the list
+      #condConf_psets.append(combined_output)
+      #examples_output.append(example_output)
+
+      examples_output.append(combined_output)
+
+    examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
+    #examples_output = [model.nested_sets((val_dataset[img_idx][0].unsqueeze(0).to(device),),lam=lam) for img_idx in idx_iterator]
     examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
     if val_dataset[0][0].shape[0] > 1:
       inputs = [val_dataset[img_idx][0][0] for img_idx in idx_iterator]
     else:
       inputs = [val_dataset[img_idx][0] for img_idx in idx_iterator]
-    raw_images_dict = {'inputs': inputs, 
-                       'gt': examples_gt,
-                       'predictions': [example[1] for example in examples_output], 
-                       'lower_edge': [example[0] for example in examples_output], 
-                       'upper_edge': [example[2] for example in examples_output] 
+    raw_images_dict = {'CP_lower_edge': [example[0] for example in examples_output], 
+                       'CP_upper_edge': [example[2] for example in examples_output] 
                       }
 
     if val_dataset[0][0].shape[0] > 1:
@@ -81,7 +421,8 @@ def get_images(model,
     except:
       pass
 
-    return examples_input, examples_lower_edge, examples_prediction, examples_upper_edge, examples_ground_truth, examples_lower_length, examples_upper_length, raw_images_dict
+    return raw_images_dict
+    #examples_input, examples_lower_edge, examples_prediction, examples_upper_edge, examples_ground_truth, examples_lower_length, examples_upper_length, raw_images_dict
 
 def get_loss_table(model, dataset, config):
   try:
@@ -112,19 +453,47 @@ def get_loss_table(model, dataset, config):
     out_dataset = TensorDataset(outputs,labels)
 
     print("GET LOSS TABLE FROM OUTPUTS")
-    loss_table = torch.zeros((outputs.shape[0],config['num_lambdas']))
+    batch_size = 4
+    num_samples = len(out_dataset)
+    num_lambdas = config['num_lambdas']
+    
+    # Determine the number of full batches
+    num_full_batches = num_samples // batch_size
+    adjusted_num_samples = num_full_batches * batch_size
+    
+    # Initialize the loss_table with the appropriate shape
+    loss_table = torch.zeros((adjusted_num_samples, num_lambdas), device=device)
+    
     dataloader = DataLoader(out_dataset, batch_size=4, shuffle=False, num_workers=0) 
     model = model.to(device)
     i = 0
     for batch in dataloader:
       x, labels = batch
+        
+      # Skip the last batch if it is smaller than batch_size
+      if x.shape[0] < batch_size: 
+          break
+        
+      x = x.to(device)
       labels = labels.to(device)
+        
+      # For each lambda value, compute the sets and loss
       for j in range(lambdas.shape[0]):
-        sets = model.nested_sets_from_output(x.to(device), lam=lambdas[j]) 
-        loss_table[i:i+x.shape[0],j] = rcps_loss_fn(sets, labels)
+          sets = model.nested_sets_from_output(x, lam=lambdas[j]) 
+          #print(x.shape[0])
+            
+          # Calculate the loss
+          loss = rcps_loss_fn(sets, labels)
+          #print(loss.shape)
+          #print('\n')
+            
+          # Ensure the loss is correctly assigned to loss_table
+          loss_table[i:i + x.shape[0], j] = loss
+        
       i += x.shape[0]
-    print("DONE!")
-    return loss_table 
+    
+  print("DONE!")
+  return loss_table
 
 
 def eval_set_metrics(model, dataset, config):
@@ -155,6 +524,10 @@ def eval_set_metrics(model, dataset, config):
     losses, sizes, spearman, stratified_risks, mse, spatial_miscoverage = get_rcps_metrics_from_outputs(model, out_dataset, rcps_loss_fn, device)
     print("DONE!")
     return losses.mean(), sizes, spearman, stratified_risks, mse, spatial_miscoverage
+
+
+
+
 
 def eval_net(net, loader, device):
     with torch.no_grad():
