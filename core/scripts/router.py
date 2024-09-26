@@ -84,10 +84,10 @@ def get_config():
         "UQ_method": "Cond CP" , # "Risk Control", "Cond CP"
         "condConf_testing_mode": True,
         "num_calib_img": 2, # 30
-        "num_val_img": 5, # 5
-        "condConf_basis_type": "linear", # "linear" # const
+        "num_val_img": 2, # 5
+        "condConf_basis_type": "const", # "linear" # const
         "center_window_size": 40 ,# side length of center window for calibration set
-        "val_center_window_size": 50, # 200 # side length of center window for validation set
+        "val_center_window_size": 40, # 200 # side length of center window for validation set
         "var_window_size": 20 # side length of sliding variance window
         }
   return config
@@ -100,10 +100,22 @@ def get_img_generating_fname(config):
                  f"{config['lr']}_"
                  f"{config['input_normalization']}_"
                  f"({config['output_normalization'].replace('.', '_')})_"
-                 f"(num_calib={config['num_calib_img']})_"
+                 f"({config['num_calib_img']})_"
+                 f"({config['num_val_img']})_"
                  f"{config['center_window_size']}_"
                  f"{config['val_center_window_size']}_"
                  f"{config['condConf_basis_type']}.pkl") # 
+  return results_fname
+
+
+
+def get_img_save_fname(config):
+  results_fname = (f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/images/{config['dataset']}_"
+                 f"({config['num_calib_img']})_"
+                 f"({config['num_val_img']})_"
+                 f"{config['center_window_size']}_"
+                 f"{config['val_center_window_size']}_"
+                 f"{config['condConf_basis_type']}") # 
   return results_fname
 
 if __name__ == "__main__":
@@ -124,10 +136,15 @@ if __name__ == "__main__":
                  f"{wandb.config['lr']}_"
                  f"{wandb.config['input_normalization']}_"
                  f"({wandb.config['output_normalization'].replace('.', '_')})_"
-                 f"(num_calib={wandb.config['num_calib_img']})_"
+                 f"({wandb.config['num_calib_img']})_"
+                 f"({wandb.config['num_val_img']})_"
                  f"{wandb.config['center_window_size']}_"
                  f"{wandb.config['val_center_window_size']}_"
-                 f"{wandb.config['condConf_basis_type']}.pkl")
+                 f"{wandb.config['condConf_basis_type']}.pkl") 
+
+  
+
+  #results_fname = get_img_generating_fname(wandb.config)
 
   if os.path.exists(results_fname):
     print(f"Results already precomputed and stored in {results_fname}!")

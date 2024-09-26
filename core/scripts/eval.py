@@ -9,7 +9,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from core.calibration.calibrate_model import get_rcps_loss_fn, get_rcps_metrics_from_outputs
 from core.utils import standard_to_minmax
 
-from core.calibration.calibrate_model_new import vectorize, tensorize, create_nonconformity_score_fns_modified, generate_linear_phi_components,get_center_window
+from core.calibration.calibrate_model_new import vectorize,  tensorize,  create_nonconformity_score_fns_modified,  generate_linear_phi_components, generate_const_phi_components, get_center_window
 from core.condconf import CondConf
 import wandb
 import pdb
@@ -37,10 +37,20 @@ def process_pixel(model,
                   pixel_idx, 
                   x_vec):
     model = model.to(device)
-    input_pixel = x_vec[pixel_idx,:].reshape(-1, 3)
+    print(pixel_idx)
+    print(f"x_vec shape: {x_vec.shape}",flush = True)
+    if config['condConf_basis_type'] != "linear":
+      input_pixel = x_vec[pixel_idx]#.reshape(-1, 1)
+    else:
+      input_pixel = x_vec[pixel_idx,:].reshape(-1, 3)
     # Create inverse score function for the current pixel
     #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
-    _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model, val_dataset_i, window_size, device, lambdas, pixel_idx)
+    _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model,
+                                                                                    val_dataset_i, 
+                                                                                    window_size, 
+                                                                                    device, 
+                                                                                    lambdas, 
+                                                                                    pixel_idx)
 
     # Generate the CondConf prediction set
     condConf_pset = condConf.predict(
@@ -64,7 +74,7 @@ def get_images_condConf_parallel(model,
                                 config, 
                                 lambdas, 
                                 condConf):
-    # parallelized version of get_images_condConf() to speed up
+    # Parallelized version of get_images_condConf() to speed up
     print(f"Entered condConf pset generation for validation set.")
     with torch.no_grad():
         model = model.to(device)
@@ -79,7 +89,7 @@ def get_images_condConf_parallel(model,
         try:
             # If dataset is iterable, create a list of outputs
             my_iter = iter(val_dataset)
-            print(f"Number of val images is: {idx_iterator}")
+            print(f"Number of val images is: {len(idx_iterator)}")
             val_dataset = [next(my_iter) for img_idx in idx_iterator]
         except:
             pass
@@ -87,27 +97,39 @@ def get_images_condConf_parallel(model,
         num_val_images = len(val_dataset)
         print("    Generate val set for condConf.")
         x_test = torch.stack([data[0] for data in val_dataset])
-        x_test = generate_linear_phi_components(x_test, window_size, variance_nbhd_size)
-        y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1], window_size)) for i in range(len(val_dataset))])
+
+        condConf_basis_type = config['condConf_basis_type']  # possible values: "const", "linear"
+        if condConf_basis_type != "linear":
+            x_test = generate_const_phi_components(x_test, window_size)
+        else:
+            x_test = generate_linear_phi_components(x_test, window_size,variance_nbhd_size)
+        
+        #y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1], window_size)) for i in range(len(val_dataset))])
+        y_test = np.concatenate([vectorize(get_center_window(data[1], window_size)) for data in val_dataset])
 
         condConf_psets = []
         examples_output = []
         all_variances = []  # To store local pixel intensity variances
- 
+        store_variances = (condConf_basis_type == "linear")  # Only generate variances if condConf_basis_type is "linear"
 
         print("    Computing condConf psets for val set.")
-        length = window_size ** 2# number of pixels in the current image
+        length = window_size ** 2  # number of pixels in the current image
 
         # Loop through validation dataset
         for img_idx in idx_iterator:
             print(f"    Compute pset for the {img_idx+1}-th val image")
             start_idx = img_idx * length 
             end_idx = start_idx + length
-            x_vec = x_test[start_idx:end_idx, :] # get the phi components for the (img_idx)-th input image
-            # get variances
-            variances = x_vec[:,1]
-            variances = tensorize(variances, 1, window_size, window_size)
-            # get (img_idx)-th validation image
+            x_vec = x_test[start_idx:end_idx, :]  # get the phi components for the (img_idx)-th input image
+
+            # If we are generating variances, calculate them
+            if store_variances:
+                variances = x_vec[:,1]
+                variances = tensorize(variances, 1, window_size, window_size)
+            else:
+                variances = None  # Set variances to None if not "linear"
+
+            # Get (img_idx)-th validation image
             val_dataset_i = val_dataset[img_idx]
 
             # Parallelize the pixel processing
@@ -115,7 +137,7 @@ def get_images_condConf_parallel(model,
                 model, condConf, config, lambdas, window_size, device, val_dataset_i, pixel_idx, x_vec
             ) for pixel_idx in range(length))
 
-            all_lower_bounds, all_upper_bounds = zip(*results) # "*" unpacks the list results, and zip() combines elements from each tuple at corresponding positions
+            all_lower_bounds, all_upper_bounds = zip(*results)  # "*" unpacks the list results, and zip() combines elements from each tuple at corresponding positions
 
             # Tensorize the condConf prediction set to image forms
             condConf_pset_lower = np.concatenate(all_lower_bounds)
@@ -133,20 +155,26 @@ def get_images_condConf_parallel(model,
             # Combine the lower, middle, and upper predictions into a single tensor
             combined_output = torch.stack([condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()], dim=0)
             examples_output.append(combined_output)
-            all_variances.append(variances.cpu().numpy())
-        
-        examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
-        examples_variance = [torch.tensor(v) for v in all_variances]# Stack the variances into a list of tensors like `examples_output`
-        examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
-        inputs = [val_dataset[img_idx][0][0] if val_dataset[0][0].shape[0] > 1 else val_dataset[img_idx][0] for img_idx in idx_iterator]
 
+            # Store variances if they were calculated
+            if store_variances:
+                all_variances.append(variances.cpu().numpy())
+            else:
+                all_variances.append(None)
+
+        examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
+        examples_variance = [torch.tensor(v) if v is not None else None for v in all_variances]  # Ensure we handle None cases
+        examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
+        #inputs = [val_dataset[img_idx][0][0] if val_dataset[0][0].shape[0] > 1 else val_dataset[img_idx][0] for img_idx in idx_iterator]
+        inputs      = [val_dataset[img_idx][0] for img_idx in idx_iterator]
+        
         raw_images_dict = {
             'inputs': inputs,
             'gt': examples_gt,
             'predictions': [example[1] for example in examples_output],
             'condConf_lower_edge': [example[0] for example in examples_output],
             'condConf_upper_edge': [example[2] for example in examples_output],
-            'variances': examples_variance  # Saving the variances
+            'variances': examples_variance  # Saving the variances or None
         }
 
         try:

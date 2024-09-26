@@ -21,7 +21,8 @@ import cmasher as cmr
 
 # for condConf modifications
 from core.calibration.calibrate_model_new import vectorize, tensorize, create_nonconformity_score_fns_modified, generate_linear_phi_components,get_center_window
-from core.scripts.router import get_config, get_img_generating_fname
+from core.scripts.router import get_config, get_img_generating_fname,get_img_save_fname
+
 
 def normalize_01(x):
   x = x - x.min()
@@ -166,19 +167,30 @@ def plot_risks(methodnames,loss_table_list,n,alpha,delta,num_trials=100):
 
 
 
+# def get_img_save_fname(config): # the name of the folder 
+#   results_fname = (f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/images/{config['dataset']}_"
+#                  f"({config['num_calib_img']})_"
+#                  f"({config['num_val_img']})_"
+#                  f"{config['center_window_size']}_"
+#                  f"{config['val_center_window_size']}_"
+#                  f"{config['condConf_basis_type']}") # 
+#   return results_fname
 
 def plot_correlation_from_results(results):
-    # Define the output directory
-    output_dir = '/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/images/sizePredCorr'
-    
+    # Define the output directory based on config
+    config = get_config()
+    output_base_dir = get_img_save_fname(config)
+    output_dir = os.path.join(output_base_dir, "sizePredCorr/")  # Treat sizePredCorr as a subfolder
+
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
+
+    condconf_basis_type = config['condConf_basis_type']
 
     # Unwrap the lists into flattened arrays
     predictions = np.hstack([pred.flatten() for pred in results['predictions']])
     condConf_lower = np.hstack([edge.flatten() for edge in results['condConf_lower_edge']])
     condConf_upper = np.hstack([edge.flatten() for edge in results['condConf_upper_edge']])
-    variances = np.hstack([var.flatten() for var in results['variances']])
     
     # Compute condConf sizes (upper - lower bounds)
     condConf_sizes = condConf_upper - condConf_lower
@@ -200,77 +212,69 @@ def plot_correlation_from_results(results):
 
     # Convert all_rel_abs_errors to a numpy array
     all_rel_abs_errors = np.array(all_rel_abs_errors)
-    # Debugging: Print lengths of the arrays
+    
+    # Debugging: Print lengths of the arrays to ensure they match
     print(f"Length of condConf_sizes: {len(condConf_sizes)}")
     print(f"Length of predictions: {len(predictions)}")
-    print(f"Length of variances: {len(variances)}")
     print(f"Length of all_rel_abs_errors: {len(all_rel_abs_errors)}")
+
     # Generate caption for plots
     config_caption = generate_config_caption()
 
     # 1. Scatter plot: condConf_sizes vs predictions
-    df_1 = pd.DataFrame({
-        'condConf_sizes': condConf_sizes,
-        'predictions': predictions
-    })
-    correlation_1 = df_1.corr(method='pearson')['condConf_sizes']['predictions']
-    print(f"Pearson correlation (condConf_sizes vs predictions): {correlation_1}")
-    
-    plt.figure(figsize=(10, 6))
-    sns.regplot(x='condConf_sizes', y='predictions', data=df_1, scatter_kws={'s': 10}, line_kws={'color': 'red'})
-    plt.title(f'Correlation between condConf Sizes and Predictions\nPearson correlation: {correlation_1:.2f}')
-    plt.xlabel('condConf Sizes')
-    plt.ylabel('Predictions')
+    if len(condConf_sizes) == len(predictions):
+        df_1 = pd.DataFrame({
+            'condConf_sizes': condConf_sizes,
+            'predictions': predictions
+        })
+        correlation_1 = df_1.corr(method='pearson')['condConf_sizes']['predictions']
+        print(f"Pearson correlation (condConf_sizes vs predictions): {correlation_1}")
+        
+        plt.figure(figsize=(10, 6))
+        sns.regplot(x='condConf_sizes', y='predictions', data=df_1, scatter_kws={'s': 10}, line_kws={'color': 'red'})
+        plt.title(f'Correlation between condConf Sizes and Predictions\nPearson correlation: {correlation_1:.2f}')
+        plt.xlabel('condConf Sizes')
+        plt.ylabel('Predictions')
+        plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
+        plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_predictions.png'), bbox_inches="tight")
+        plt.close()
 
-    # Add the experiment caption
-    plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
-
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_predictions.png'), bbox_inches="tight")
-    plt.close()  # Close the plot without showing it
-
-    # 2. Scatter plot: condConf_sizes vs local 20*20 est. variances
-    df_2 = pd.DataFrame({
-        'condConf_sizes': condConf_sizes,
-        'variances': variances
-    })
-    correlation_2 = df_2.corr(method='pearson')['condConf_sizes']['variances']
-    print(f"Pearson correlation (condConf_sizes vs variances): {correlation_2}")
-    
-    plt.figure(figsize=(10, 6))
-    sns.regplot(x='condConf_sizes', y='variances', data=df_2, scatter_kws={'s': 10}, line_kws={'color': 'red'})
-    plt.title(f'Correlation between condConf Sizes and Variances\nPearson correlation: {correlation_2:.2f}')
-    plt.xlabel('condConf Sizes')
-    plt.ylabel('Local 20*20 Estimated Variances')
-
-    # Add the experiment caption
-    plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
-
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_variances.png'), bbox_inches="tight")
-    plt.close()  # Close the plot without showing it
+    # 2. Scatter plot: condConf_sizes vs local 20*20 est. variances (skip if type isn't linear)
+    if condconf_basis_type == "linear" and len(condConf_sizes) == len(results['variances']):
+        variances = np.hstack([var.flatten() for var in results['variances']])
+        df_2 = pd.DataFrame({
+            'condConf_sizes': condConf_sizes,
+            'variances': variances
+        })
+        correlation_2 = df_2.corr(method='pearson')['condConf_sizes']['variances']
+        print(f"Pearson correlation (condConf_sizes vs variances): {correlation_2}")
+        
+        plt.figure(figsize=(10, 6))
+        sns.regplot(x='condConf_sizes', y='variances', data=df_2, scatter_kws={'s': 10}, line_kws={'color': 'red'})
+        plt.title(f'Correlation between condConf Sizes and Variances\nPearson correlation: {correlation_2:.2f}')
+        plt.xlabel('condConf Sizes')
+        plt.ylabel('Local 20*20 Estimated Variances')
+        plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
+        plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_variances.png'), bbox_inches="tight")
+        plt.close()
 
     # 3. Scatter plot: condConf_sizes vs rel_abs_error
-    df_3 = pd.DataFrame({
-        'condConf_sizes': condConf_sizes,
-        'rel_abs_error': all_rel_abs_errors
-    })
-    correlation_3 = df_3.corr(method='pearson')['condConf_sizes']['rel_abs_error']
-    print(f"Pearson correlation (condConf_sizes vs rel_abs_error): {correlation_3}")
-    
-    plt.figure(figsize=(10, 6))
-    sns.regplot(x='condConf_sizes', y='rel_abs_error', data=df_3, scatter_kws={'s': 10}, line_kws={'color': 'red'})
-    plt.title(f'Correlation between condConf Sizes and Relative Absolute Errors\nPearson correlation: {correlation_3:.2f}')
-    plt.xlabel('condConf Sizes')
-    plt.ylabel('Relative Absolute Errors')
-
-    # Add the experiment caption
-    plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
-
-    # Save the plot
-    plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_rel_abs_error.png'), bbox_inches="tight")
-    plt.close()  # Close the plot without showing it
-
+    if len(condConf_sizes) == len(all_rel_abs_errors):
+        df_3 = pd.DataFrame({
+            'condConf_sizes': condConf_sizes,
+            'rel_abs_error': all_rel_abs_errors
+        })
+        correlation_3 = df_3.corr(method='pearson')['condConf_sizes']['rel_abs_error']
+        print(f"Pearson correlation (condConf_sizes vs rel_abs_error): {correlation_3}")
+        
+        plt.figure(figsize=(10, 6))
+        sns.regplot(x='condConf_sizes', y='rel_abs_error', data=df_3, scatter_kws={'s': 10}, line_kws={'color': 'red'})
+        plt.title(f'Correlation between condConf Sizes and Relative Absolute Errors\nPearson correlation: {correlation_3:.2f}')
+        plt.xlabel('condConf Sizes')
+        plt.ylabel('Relative Absolute Errors')
+        plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
+        plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_rel_abs_error.png'), bbox_inches="tight")
+        plt.close()
 
 
 def crop_to_val_window_size(x):
@@ -300,7 +304,7 @@ def generate_config_caption():
     caption = f"Num calib img: {config['num_calib_img']}\n"
     caption += f"Calib img size: {config['center_window_size']}\n"
     caption += f"Val img size: {config['val_center_window_size']}\n"
-    caption += f"CondConf basis: {config['condConf_basis_type']}\n"
+    caption += f"CondConf basis: {config['condConf_basis_type']}"
     return caption
 
 
@@ -318,8 +322,9 @@ def plot_images_uq_modified(results,
     bwr_cmap = cm.get_cmap('bwr', 50)  # Use the bwr colormap from Matplotlib
     
     # generate directory
-    base_output_path = '/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/images/'
-    combined_all_path = os.path.join(base_output_path, 'combined_all/')
+    config = get_config()
+    base_output_path = get_img_save_fname(config)
+    combined_all_path = os.path.join(base_output_path, "combined_all/")
     os.makedirs(combined_all_path, exist_ok=True)
     
     # set font for captions
@@ -391,6 +396,21 @@ def plot_images_uq_modified(results,
         create_colorbar(coolwarm_cmap, mixed_CP_prediction_set_sizes.shape[0], 0, 1, 'CP Sizes', os.path.join(foldername, "colorbar_CP_sizes.png"))
         create_colorbar(coolwarm_cmap, mixed_CP_prediction_set_sizes.shape[0], 0, 1, 'CondConf Sizes', os.path.join(foldername, "colorbar_condConf_sizes.png"))
        
+
+        # If condConf_basis_type is not "linear", use the modified figure 10
+        if config['condConf_basis_type'] != "linear":
+            fig10_name = f"{weight_diff}*(pred-gt)+{weight_pred}*(pred)"
+            fig10_image = (255 * combined_diff_pred).astype('uint8')
+            grayscale_variances = None
+        else:
+            fig10_name = f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)"
+            fig10_image = (255 * normalize_01(mixed_condConf_prediction_set_sizes.cpu().numpy())).astype('uint8')
+            variances = results['variances'][i].squeeze()  # Assuming variances is a tensor
+            normalized_variances = normalize_01(variances)  # Normalize to [0, 1]
+            grayscale_variances = (255 * normalized_variances.numpy()).astype('uint8')  # Convert to grayscale
+        
+        
+
         # Save image grid
         images = {
 
@@ -410,7 +430,8 @@ def plot_images_uq_modified(results,
             "rel_abs_diff * colored_gt (Rina)": (255 * rel_diff_mult_colored_gt).astype('uint8'),  # Fig 9
 
             # Fig 10-12 are for additional UQ visualizations (order reversed)
-            f"{weight_diff}*(pred-gt)+{weight_pred}*(pred)": (255 * combined_diff_pred).astype('uint8'),  # Fig 10
+            "grayscale_variances": grayscale_variances,  # Fig 10 (new)
+            fig10_name: fig10_image,  # Adjusted Fig 10 depending on condConf_basis_type
             f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)": (255 * normalize_01(mixed_condConf_prediction_set_sizes.cpu().numpy())).astype('uint8'),  # Fig 11
             f"{weight_diff}*CP_sizes+{weight_pred}*(pred)": (255 * normalize_01(mixed_CP_prediction_set_sizes.cpu().numpy())).astype('uint8')  # Fig 12
         }
@@ -441,13 +462,15 @@ def plot_images_uq_modified(results,
             (img_width + 2 * label_height + 50, 3 * (img_height + 2 * label_height) + 100),
             (2 * (img_width + 2 * label_height + 50), 3 * (img_height + 2 * label_height) + 100)
         ]
-
+        
         names = [ 
             "gt", "input", "prediction",
             "abs_diff_normalized", "condConf_set_sizes", "CP_set_sizes",
             "relative_abs_diff", "colored_gt", "rel_abs_diff * colored_gt (Rina)",
-            f"{weight_diff}*(pred-gt)+{weight_pred}*(pred)", f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)", f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"
+            "grayscale_variances", f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)", f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"
         ]
+        if config['condConf_basis_type'] != "linear":
+          names[9] = fig10_name
 
         fig_numbers = ["Fig1", "Fig2", "Fig3", "Fig4", "Fig5", "Fig6", "Fig7", "Fig8", "Fig9", "Fig10", "Fig11", "Fig12"]
 
@@ -457,10 +480,10 @@ def plot_images_uq_modified(results,
             
 
             # the following if statement adds appropriate colorbars to sub images as needed
-            if name in ["colored_gt", f"{weight_diff}*(pred-gt)+{weight_pred}*(pred)", f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)",f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"]:
+            if name in ["colored_gt", fig10_name, f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"]:
                 if name == "colored_gt":
                     colorbar_path = os.path.join(foldername, "colorbar_colored_gt.png")
-                elif (name == f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)") or (name == f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"):
+                elif name == fig10_name or (name == f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"):
                     colorbar_path = os.path.join(foldername, "colorbar_mixed_sizes_pred.png")
                 else:
                     colorbar_path = os.path.join(foldername, "colorbar_pred_gt.png")
@@ -493,7 +516,6 @@ def plot_images_uq_modified(results,
 
         # Copy the grid image with colorbars to the combined_all folder
         shutil.copy(grid_image_path, os.path.join(combined_all_path, f"{i}_combined_with_colorbar.png"))
-
 
 def plot_images_uq(results):
   uq_cmap = cm.get_cmap('coolwarm',50)
@@ -534,7 +556,7 @@ def generate_plots():
   methodnames = ['Quantile Regression']
 
   config = get_config()
-  results_filenames = [get_img_generating_fname(config)]
+  results_filenames = [get_img_generating_fname(config)] 
   #results_filenames = ['/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_fastmri_quantiles_16_0.001_standard_(min-max)_50_100_const.pkl']
   print(results_filenames)
   #results_filenames = ['/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_fastmri_quantiles_16_0.001_standard_(min-max)_50_50.pkl']
