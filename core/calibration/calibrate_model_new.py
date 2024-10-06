@@ -88,14 +88,20 @@ def create_phi_fn_linear(I, J, num_images):
     return phi_fn_linear
 
 
-def get_nonconformity_scores_from_dataset(model, out_dataset, device, lambda_vec,I, J, num_images, window_size = 320):
+def get_nonconformity_scores_from_dataset(model,
+                                          out_dataset,
+                                          device,
+                                          lambda_vec,
+                                          I, J, num_images,
+                                          window_size = 320,
+                                          score_defn = "heuristic"):
     # Create the nonconformity_score_fn with model, device, and lambda_vec
-    nonconformity_score_fn, nonconformity_score_inv_fn = create_nonconformity_score_fns(model, device, lambda_vec,I, J, num_images,window_size)
+    #nonconformity_score_fn, _ = create_nonconformity_score_fns(model, device, lambda_vec,I, J, num_images,window_size)
 
-    nonconformity_scores = []  # empty list for nonconformity scores to be appended to
+    #nonconformity_scores = []  # empty list for nonconformity scores to be appended to
 
    
-    model = model.to(device)  # load model to GPU
+    #model = model.to(device)  # load model to GPU
     #print("Printing nonconformity scores for each batch for debugging...")
     # dataloader = DataLoader(out_dataset, batch_size=64, shuffle=False, num_workers=0, pin_memory=True)
     # for batch in dataloader:
@@ -103,15 +109,40 @@ def get_nonconformity_scores_from_dataset(model, out_dataset, device, lambda_vec
     #     nonconformity_scores_batch = nonconformity_score_fn(x, labels)
     #     nonconformity_scores.append(torch.tensor(nonconformity_scores_batch, device=device))  # Append as tensor
     # nonconformity_scores = torch.cat(nonconformity_scores, dim=0).detach().cpu().numpy()
-    x_full = torch.stack([data[0] for data in out_dataset]).to(device)
-    labels_full = torch.stack([data[1] for data in out_dataset]).to(device)
-    nonconformity_scores = nonconformity_score_fn(x_full, labels_full)
+    all_nonconformity_scores = []
+    
+    model = model.to(device)
+
+    for i in range(num_images):
+        # Extract the i-th data
+        x, labels = out_dataset[i]
+        x = x.to(device)
+        labels = labels.to(device)
+
+        # Create a new nonconformity score function for each data pair
+        nonconformity_score_fn, _ = create_nonconformity_score_fns(model, device, lambda_vec, I, J, 1, window_size,score_defn)
+
+        # Compute the nonconformity scores for the current image
+        nonconformity_scores = nonconformity_score_fn(x, labels)
+
+        # Collect scores
+        all_nonconformity_scores.append(nonconformity_scores)
+
+    # Concatenate all nonconformity scores
+    nonconformity_scores = np.concatenate(all_nonconformity_scores, axis=0)
+       
+    
     
     
     return nonconformity_scores
 
     
-def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, window_size=320):
+def create_nonconformity_score_fns(model,
+                                   device, 
+                                   lambda_vec, 
+                                   I, J, num_images,
+                                   window_size=320,
+                                   score_defn = "heuristic"):
     # Given a pretrained model, a device, a lambda grid, and image dimensions (I, J)
     # along with the number of images, returns a score function and its inverse.
 
@@ -134,7 +165,7 @@ def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, 
             labels = torch.tensor(labels.reshape(num_images, I, J)).to(device)
         else:
             labels = torch.tensor(labels).to(device)
-
+        
         all_nonconformity_scores = []
         images_with_inf = []
 
@@ -151,21 +182,35 @@ def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, 
             label_i = labels[i]
 
             # Get prediction set components for the image
-            heuristic_psets = model(x_i.unsqueeze(0))
+            heuristic_psets = model(x_i)
             lb, fhat, ub = heuristic_psets[:, 0, :, :], heuristic_psets[:, 1, :, :], heuristic_psets[:, 2, :, :]
             lhat = fhat + lb
             uhat = ub - fhat
 
-            nonconformity_scores = torch.full(label_i.shape, float('inf'), dtype=torch.float, device=device)
+            
 
             # Compute pixel-wise nonconformity scores
-            for lam in lambdas:
-                property_satisfied = containment_check(lam, lhat, fhat, uhat, label_i)
-                nonconformity_scores = torch.where(
-                    (nonconformity_scores == float('inf')) & property_satisfied,
-                    lam,
-                    nonconformity_scores
-                )
+
+            # Compute pixel-wise nonconformity scores
+
+
+            if score_defn == "heuristic":
+              nonconformity_scores = torch.maximum((fhat - labels)/lhat, (labels - fhat)/uhat)
+            elif score_defn == "residual":
+              nonconformity_scores = torch.abs((fhat - labels))
+            else:
+              raise NotImplementedError("score_defn not implemented")
+
+
+            #### Old version of heuristic score computation #############
+            #nonconformity_scores = torch.full(label_i.shape, float('inf'), dtype=torch.float, device=device)
+            # for lam in lambdas:
+            #     property_satisfied = containment_check(lam, lhat, fhat, uhat, label_i)
+            #     nonconformity_scores = torch.where(
+            #         (nonconformity_scores == float('inf')) & property_satisfied,
+            #         lam,
+            #         nonconformity_scores
+            #     )
 
             if torch.isinf(nonconformity_scores).any():
                 images_with_inf.append(i)
@@ -182,8 +227,8 @@ def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, 
         median = np.percentile(scores, 50)
         q3 = np.percentile(scores, 75)
         max_value = np.max(scores)
-        print(f"            Shape of scores(unmodified): {scores.shape}")
-        print(f"            Score (unmodified) distribution: Q1={q1}, Median={median}, Q3={q3}, Max={max_value}")
+        print(f"            Shape of scores: {scores.shape}")
+        print(f"            Score distribution: Q1={q1}, Median={median}, Q3={q3}, Max={max_value}")
 
         return scores
 
@@ -225,8 +270,16 @@ def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, 
             uhat = ub - fhat
 
             # Calculate the lower and upper bounds for the labels
-            lower_bound = fhat - score_cutoff_i * lhat
-            upper_bound = fhat + score_cutoff_i * uhat
+            if score_defn == "heuristic":
+              lower_bound = fhat - score_cutoff_i * lhat
+              upper_bound = fhat + score_cutoff_i * uhat
+            elif score_defn == "residual":
+              lower_bound = fhat - score_cutoff_i
+              upper_bound = score_cutoff_i - fhat
+            else:
+              raise NotImplementedError("score_defn not implemented")
+
+            
 
             # Crop bounds to the center if window_size != 320
             if window_size != 320:
@@ -237,10 +290,10 @@ def create_nonconformity_score_fns(model, device, lambda_vec, I, J, num_images, 
             #all_upper_bounds.append(upper_bound.flatten().cpu().numpy())
             all_lower_bounds.append(vectorize(lower_bound.cpu().numpy())) # make sure we use vectorize() instead of .flatten() for cosistency
             all_upper_bounds.append(vectorize(upper_bound.cpu().numpy()))
-        lb = np.concatenate(all_lower_bounds)
-        ub = np.concatenate(all_upper_bounds)
+        inv_score_lb = np.concatenate(all_lower_bounds)
+        inv_score_ub = np.concatenate(all_upper_bounds)
 
-        return [ub, lb]
+        return [inv_score_ub, inv_score_lb]
 
     return nonconformity_score_fn, nonconformity_score_inv_fn
 
@@ -327,7 +380,7 @@ def generate_const_phi_components(input_dataset, window_size=100):
 
 
 
-def generate_linear_phi_components(input_dataset, window_size=100):
+def generate_linear_phi_components(input_dataset, window_size=100,edge_nbhd_size=20):
   """
   Params:
     input_dataset(torch.Tensor): tensor of size (num_images,I,J), assuming this being only downsampled images (i.e. no labels)
@@ -395,10 +448,10 @@ def create_nonconformity_score_fns_modified(model,
                                             window_size, 
                                             device, 
                                             lambda_vec,
-                                            pixel_idx=None): # is_window, I,J,num_images
-    # TODO: modify according to phi_components()
-    # Given a pretrained model, a device, a lambda grid, and image dimensions (I, J)
-    # along with the number of images, returns a score function and its inverse.
+                                            pixel_idx=None,
+                                            score_defn = "heuristic"): 
+                                           
+    # TODO: add the case when score_defn = "residual"
     
     # This is a new version of nonconformity score functions to allow more calibration data points
     # by taking more data points but only using the center windows of them 
@@ -438,79 +491,102 @@ def create_nonconformity_score_fns_modified(model,
 
 
       all_nonconformity_scores = []
-      images_with_inf = []
+      
 
       for i in range(num_images):
         print(f"            Computing scores for the {i+1}-th image.")
-        label_i = input_dataset[i][1].to(device)
-        x_i_full = input_dataset[i][0].to(device) # get the ith full image
-        
-        #print(f"                   Shape of x_i_full: {x_i_full.shape}")
 
-        # Step 1: get heuristic prediction set components: f, l, u for one image
-        # Check the number of dimensions and adjust accordingly
-        if x_i_full.ndim == 2:
-              # If x_i is 2D (shape [320, 320]), add batch and channel dimensions
-            x_i_full = x_i_full.unsqueeze(0).unsqueeze(0)  # Result: [1, 1, 320, 320]
-        elif x_i_full.ndim == 3:
-              # If x_i is 3D (shape [1, 320, 320] or [320, 320, 1]), add only the batch dimension
-            if x_i_full.shape[0] != 1:  # If the first dimension is not the channel
-                x_i_full = x_i_full.unsqueeze(0)  # Result: [1, 1, 320, 320] (assuming first dim is not the channel)
-            else:
-                x_i_full = x_i_full.unsqueeze(0)  # Result: [1, 1, 320, 320]
-        heuristic_psets = model(x_i_full)
-        lb, fhat, ub = heuristic_psets[:,0,:,:,:], heuristic_psets[:,1,:,:,:], heuristic_psets[:,2,:,:,:]  # lower-hat, f-hat, upper-hat
-        lhat = fhat + lb
-        uhat = ub - fhat
+        x_i_full, label_i = input_dataset[i]
+        x_i_full = x_i_full.to(device)
+        label_i = label_i.to(device)
+        #label_i = input_dataset[i][1].to(device)
+        #x_i_full = input_dataset[i][0].to(device) # get the ith full image
+        # Create a new nonconformity score function for each data pair
+        nonconformity_score_fn, _ = create_nonconformity_score_fns(model, device, lambda_vec, 320, 320, 1, window_size,score_defn)
 
-        # Initialize a tensor to store nonconformity scores for one image,
-        # starting from inf since nonconformity scores are defined by min...
-        nonconformity_scores = torch.full(label_i.shape, float('inf'), dtype=torch.float, device=device)
+        # Compute the nonconformity scores for the current image
+        nonconformity_scores = nonconformity_score_fn(x_i_full, label_i)
 
-        # Step 2: compute pixel-wise nonconformity scores for one image
-        for lam in lambdas:  # Traverse lambda values from smallest to largest
-              # Check the property for the current lambda value
-              property_satisfied = containment_check(lam, lhat, fhat, uhat, label_i)
-              # Update nonconformity scores where the property is satisfied for the first time
-              nonconformity_scores = torch.where(
-                (nonconformity_scores == float('inf')) & property_satisfied,  # only need to look at scores that are still inf
-                lam,  # if containment condition is satisfied, set that score to lam value
-                nonconformity_scores  # otherwise keep the original score
-                )
-          
-        # For debugging only
-        if torch.isinf(nonconformity_scores).any():
-          images_with_inf.append(i)
-       
-       
-        
-        nonconformity_scores = nonconformity_scores.squeeze(0) # squeeze out extra dimension(s)
-        #print(f"                   Shape of nonconformity_scores: {nonconformity_scores.shape}")
-        #nonconformity_scores = get_center_window(nonconformity_scores, w)
-        #all_nonconformity_scores.append(nonconformity_scores.flatten().cpu().numpy())
-        nonconformity_scores = vectorize(get_center_window(nonconformity_scores, w).cpu().numpy())
+        # Collect scores
         all_nonconformity_scores.append(nonconformity_scores)
+
+      # Concatenate all nonconformity scores
+      nonconformity_scores = np.concatenate(all_nonconformity_scores, axis=0)
+
+      return nonconformity_scores
+
+
+
+
+
+      ############## COMMENTED OUT DUE TO TESTING #################
+      #   images_with_inf = []
+      #   #print(f"                   Shape of x_i_full: {x_i_full.shape}")
+
+      #   # Step 1: get heuristic prediction set components: f, l, u for one image
+      #   # Check the number of dimensions and adjust accordingly
+      #   if x_i_full.ndim == 2:
+      #         # If x_i is 2D (shape [320, 320]), add batch and channel dimensions
+      #       x_i_full = x_i_full.unsqueeze(0).unsqueeze(0)  # Result: [1, 1, 320, 320]
+      #   elif x_i_full.ndim == 3:
+      #         # If x_i is 3D (shape [1, 320, 320] or [320, 320, 1]), add only the batch dimension
+      #       if x_i_full.shape[0] != 1:  # If the first dimension is not the channel
+      #           x_i_full = x_i_full.unsqueeze(0)  # Result: [1, 1, 320, 320] (assuming first dim is not the channel)
+      #       else:
+      #           x_i_full = x_i_full.unsqueeze(0)  # Result: [1, 1, 320, 320]
+      #   heuristic_psets = model(x_i_full)
+      #   lb, fhat, ub = heuristic_psets[:,0,:,:,:], heuristic_psets[:,1,:,:,:], heuristic_psets[:,2,:,:,:]  # lower-hat, f-hat, upper-hat
+      #   lhat = fhat + lb
+      #   uhat = ub - fhat
+
+      #   # Initialize a tensor to store nonconformity scores for one image,
+      #   # starting from inf since nonconformity scores are defined by min...
+      #   nonconformity_scores = torch.full(label_i.shape, float('inf'), dtype=torch.float, device=device)
+
+      #   # Step 2: compute pixel-wise nonconformity scores for one image
+      #   for lam in lambdas:  # Traverse lambda values from smallest to largest
+      #         # Check the property for the current lambda value
+      #         property_satisfied = containment_check(lam, lhat, fhat, uhat, label_i)
+      #         # Update nonconformity scores where the property is satisfied for the first time
+      #         nonconformity_scores = torch.where(
+      #           (nonconformity_scores == float('inf')) & property_satisfied,  # only need to look at scores that are still inf
+      #           lam,  # if containment condition is satisfied, set that score to lam value
+      #           nonconformity_scores  # otherwise keep the original score
+      #           )
+          
+      #   # For debugging only
+      #   if torch.isinf(nonconformity_scores).any():
+      #     images_with_inf.append(i)
+       
+       
+        
+      #   nonconformity_scores = nonconformity_scores.squeeze(0) # squeeze out extra dimension(s)
+      #   #print(f"                   Shape of nonconformity_scores: {nonconformity_scores.shape}")
+      #   #nonconformity_scores = get_center_window(nonconformity_scores, w)
+      #   #all_nonconformity_scores.append(nonconformity_scores.flatten().cpu().numpy())
+      #   nonconformity_scores = vectorize(get_center_window(nonconformity_scores, w).cpu().numpy())
+      #   all_nonconformity_scores.append(nonconformity_scores)
   
   
-      scores = np.concatenate(all_nonconformity_scores)#.reshape(-1,1)
+      # scores = np.concatenate(all_nonconformity_scores)#.reshape(-1,1)
       
     
-      #For debugging only
-      q1 = np.percentile(scores, 25)
-      median = np.percentile(scores, 50)
-      q3 = np.percentile(scores, 75)
-      max_value = np.max(scores)
-      print(f"            Shape of scores: {scores.shape}")
-      print(f"            Score distribution: Q1={q1}, Median={median}, Q3={q3}, Max={max_value}")
+      # #For debugging only
+      # q1 = np.percentile(scores, 25)
+      # median = np.percentile(scores, 50)
+      # q3 = np.percentile(scores, 75)
+      # max_value = np.max(scores)
+      # print(f"            Shape of scores: {scores.shape}")
+      # print(f"            Score distribution: Q1={q1}, Median={median}, Q3={q3}, Max={max_value}")
     
-      # Print which images have `inf` values in their scores
-      #if images_with_inf:
-      #  print(f"            Indices of images with inf nonconformity scores: {images_with_inf}")
-      #else:
-      #  print("            No images have inf nonconformity scores.")
+      # # Print which images have `inf` values in their scores
+      # #if images_with_inf:
+      # #  print(f"            Indices of images with inf nonconformity scores: {images_with_inf}")
+      # #else:
+      # #  print("            No images have inf nonconformity scores.")
  
-      return scores
-
+      # return scores
+      ############## COMMENTED OUT DUE TO TESTING #################
       
 
     def nonconformity_score_inv_fn_modified(score_cutoffs, x):
@@ -531,17 +607,27 @@ def create_nonconformity_score_fns_modified(model,
       lhat = (fhat + lb).squeeze(0)
       uhat = (ub - fhat).squeeze(0)
       fhat = fhat.squeeze(0)
+
       #print(f"            Shape of lhat in inv score: {lhat.shape}")
       if isinstance(score_cutoffs, torch.Tensor):
         score_cutoffs = score_cutoffs.cpu().numpy()
+
       lhat = vectorize(get_center_window(lhat,w))[pixel_idx]#.numpy()
       fhat = vectorize(get_center_window(fhat,w))[pixel_idx]#.numpy()
       uhat = vectorize(get_center_window(uhat,w))[pixel_idx]#.numpy()
 
 
       # Calculate the lower and upper bounds for the labels for one image
-      lower_bound = fhat - score_cutoffs * lhat
-      upper_bound = fhat + score_cutoffs * uhat
+      if score_defn == "heuristic":
+        lower_bound = fhat - score_cutoff_i * lhat
+        upper_bound = fhat + score_cutoff_i * uhat
+      elif score_defn == "residual":
+        lower_bound = fhat - score_cutoff_i
+        upper_bound = score_cutoff_i - fhat
+      else:
+        raise NotImplementedError("score_defn not implemented")
+      # lower_bound = fhat - score_cutoffs * lhat
+      # upper_bound = fhat + score_cutoffs * uhat
       return [lower_bound,upper_bound]
     
     return nonconformity_score_fn_modified, nonconformity_score_inv_fn_modified
@@ -680,11 +766,13 @@ def calibrate_model_by_CondConf(model, dataset, config):
 
         print( "        Create nonconformity score function and its inverse")
         #nonconformity_score_fn, nonconformity_score_inv_fn = create_nonconformity_score_fns(model, device, lambdas,I, J, num_images)
+        score_defn = config['score_defn']
         nonconformity_score_fn_modified, _ = create_nonconformity_score_fns_modified(model, 
                                                                                     dataset,
                                                                                     window_size,  
                                                                                     device,  
-                                                                                    lambdas)
+                                                                                    lambdas,
+                                                                                    score_defn)
         #  def create_nonconformity_score_fns_modified(model, 
         #                                     input_dataset,
         #                                     window_size, 
@@ -716,7 +804,8 @@ def calibrate_model_by_CondConf(model, dataset, config):
                                                                     I,
                                                                     J,
                                                                     num_images,
-                                                                    window_size)
+                                                                    window_size,
+                                                                    score_defn)
         
         # Set the value of lam to be the 1 - (alpha / T) quantile of the nonconformity scores
         print("        Pick the adjusted conformal quantile")
@@ -727,14 +816,14 @@ def calibrate_model_by_CondConf(model, dataset, config):
         # Compute the loss table for each lambda value, 
         # starting from largest in grid and stopping at tunned lambda value
 
-        # For debugging condConf only:
-        print(f"            Validating the two score functions")
-        noncomformity_scores_from_modified_score_func = nonconformity_score_fn_modified(x_calib, y_calib)
-        diff = nonconformity_scores - noncomformity_scores_from_modified_score_func
-        print("            Original Scores    |    Modified Scores    |    Difference")
-        print("            ---------------------------------------------------------")
-        for orig, mod, d in zip(nonconformity_scores, noncomformity_scores_from_modified_score_func, diff):
-          print(f"            {orig:<20} | {mod:<20} | {d:<20}")
+        # # For debugging condConf only:
+        # print(f"            Validating the two score functions")
+        # noncomformity_scores_from_modified_score_func = nonconformity_score_fn_modified(x_calib, y_calib)
+        # diff = nonconformity_scores - noncomformity_scores_from_modified_score_func
+        # print("            Original Scores    |    Modified Scores    |    Difference")
+        # print("            ---------------------------------------------------------")
+        # for orig, mod, d in zip(nonconformity_scores, noncomformity_scores_from_modified_score_func, diff):
+        #   print(f"            {orig:<20} | {mod:<20} | {d:<20}")
         # loss table based on CP prediction set
         print("            Computing calib loss table")
         calib_loss_table = torch.zeros((outputs.shape[0], lambdas.shape[0]), device='cpu')
@@ -933,9 +1022,9 @@ def calibrate_model_by_CP(model, dataset, config):
         dlambda = lambdas[1] - lambdas[0]  # get the step size (from linspace)
         model.set_lhat(lambdas[-1] + dlambda - 1e-9)  # set lhat to the maximum value of lambda
         print("Computing nonconformity scores of calibration set")
-
+        score_defn = config['score_defn']
         # Retrieve the dataloader and get nonconformity scores
-        nonconformity_scores = get_nonconformity_scores_from_dataset(model, dataset, device, lambdas,I, J, num_images)
+        nonconformity_scores = get_nonconformity_scores_from_dataset(model, dataset, device, lambdas,I, J, num_images,score_defn)
         
         # Set the value of lam to be the 1 - (alpha / T) quantile of the nonconformity scores
         print("Picking the adjusted conformal quantile")

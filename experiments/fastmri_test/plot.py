@@ -305,6 +305,7 @@ def generate_config_caption():
     caption += f"Calib img size: {config['center_window_size']}\n"
     caption += f"Val img size: {config['val_center_window_size']}\n"
     caption += f"CondConf basis: {config['condConf_basis_type']}"
+    caption += f", Alpha: {config['alpha']}"
     return caption
 
 
@@ -517,6 +518,79 @@ def plot_images_uq_modified(results,
         # Copy the grid image with colorbars to the combined_all folder
         shutil.copy(grid_image_path, os.path.join(combined_all_path, f"{i}_combined_with_colorbar.png"))
 
+                # Generate the new 1-by-5 image grid for thesis (input image removed) with reused colorbars for Fig4 and Fig5
+        # Define the subfigure order and subfigure names (removed "input")
+        thesis_subfig_names = ["gt", "prediction", "relative_abs_diff",
+                               f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)",
+                               f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"]
+
+        # Set up the folder path for saving the new grid
+        thesis_output_path = os.path.join(base_output_path, "for_thesis/")
+        os.makedirs(thesis_output_path, exist_ok=True)
+
+        # Create the 1-by-5 grid with no extra black space at the top or after Fig5
+        thesis_img_width, thesis_img_height = images['gt'].shape[1], images['gt'].shape[0]
+        label_height = max([temp_draw.textsize(name, font=font)[1] for name in thesis_subfig_names]) + 10  # For subcaptions
+
+        # Adjust total width: no extra width for colorbars, just the 5 images
+        thesis_total_width = 5 * (thesis_img_width + 2 * label_height + 50)  # No extra space for colorbars
+        thesis_total_height = thesis_img_height + 2 * label_height  # 1 row of images and captions
+
+        # Create a new image grid with black background
+        thesis_grid_image = Image.new('RGB', (thesis_total_width, thesis_total_height), 'black')
+        draw_thesis = ImageDraw.Draw(thesis_grid_image)
+
+        # Define the positions for the 1-by-5 grid (1 row and 5 columns)
+        thesis_positions = [
+            (col * (thesis_img_width + 2 * label_height + 50), 0) for col in range(5)
+        ]
+
+        # Define the sub-figure numbers for the thesis grid
+        thesis_fig_numbers = ["Fig1", "Fig2", "Fig3", "Fig4", "Fig5"]
+
+        # Paste the images into the thesis grid and add subcaptions and figure numbers
+        for pos, name, fig_number in zip(thesis_positions, thesis_subfig_names, thesis_fig_numbers):
+            sub_image = Image.fromarray(images[name]).convert('RGB')
+            thesis_grid_image.paste(sub_image, (pos[0] + label_height, pos[1] + label_height))
+
+            # Add subcaption (name) at the top of each sub-image
+            draw_thesis.text((pos[0] + 5, pos[1] + 5), name, font=font, fill="white")
+
+            # Add figure number below each sub-image
+            text_size = draw_thesis.textsize(fig_number, font=font)
+            text_x = pos[0] + label_height + (thesis_img_width // 2) - (text_size[0] // 2)
+            text_y = pos[1] + thesis_img_height + label_height + 5
+            draw_thesis.text((text_x, text_y), fig_number, font=font, fill="white")
+
+            # Reuse the colorbars for Fig4 (condConf) and Fig5 (CP)
+            if name == f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)":
+                colorbar_path = os.path.join(foldername, "colorbar_mixed_sizes_pred.png")  # Reuse condConf colorbar
+                colorbar_image = Image.open(colorbar_path)
+                colorbar_image = colorbar_image.resize((50, sub_image.height), Image.ANTIALIAS)
+                # Paste the colorbar directly next to Fig4
+                thesis_grid_image.paste(colorbar_image, (pos[0] + label_height + sub_image.width, pos[1] + label_height))
+
+            elif name == f"{weight_diff}*CP_sizes+{weight_pred}*(pred)":
+                colorbar_path = os.path.join(foldername, "colorbar_mixed_sizes_pred.png")  # Reuse CP colorbar
+                colorbar_image = Image.open(colorbar_path)
+                colorbar_image = colorbar_image.resize((50, sub_image.height), Image.ANTIALIAS)
+                # Paste the colorbar directly next to Fig5
+                thesis_grid_image.paste(colorbar_image, (pos[0] + label_height + sub_image.width, pos[1] + label_height))
+
+        # Save the thesis grid image
+        thesis_grid_image_path = os.path.join(thesis_output_path, f"{i}_thesis_grid.png")
+        thesis_grid_image.save(thesis_grid_image_path)
+
+        # Optionally, print confirmation
+        print(f"Saved thesis grid image to {thesis_grid_image_path}")
+
+
+
+
+
+
+
+
 def plot_images_uq(results):
   uq_cmap = cm.get_cmap('coolwarm',50)
   os.makedirs('outputs/images/',exist_ok=True)
@@ -560,7 +634,7 @@ def generate_plots():
   #results_filenames = ['/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_fastmri_quantiles_16_0.001_standard_(min-max)_50_100_const.pkl']
   print(results_filenames)
   #results_filenames = ['/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_fastmri_quantiles_16_0.001_standard_(min-max)_50_50.pkl']
-  loss_tables_filenames = ['/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/loss_table_fastmri_quantiles_16_0.001_standard_min-max.pth']
+  loss_tables_filenames = ['experiments/fastmri_test/outputs/raw/loss_table_fastmri_quantiles_16_0.001_standard_min-max.pth'] # /project2/rina/lekunbillwang/im2im-uq/
   
   #methodnames = ['Residual Magnitude','Gaussian','Softmax','Quantile Regression']
   #results_filenames = ['outputs/raw/results_fastmri_residual_magnitude_78_0.0001_standard_standard.pkl','outputs/raw/results_fastmri_gaussian_78_0.001_standard_standard.pkl','outputs/raw/results_fastmri_softmax_256_0.001_standard_min-max.pkl','outputs/raw/results_fastmri_quantiles_78_0.0001_standard_standard.pkl']

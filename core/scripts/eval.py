@@ -37,28 +37,30 @@ def process_pixel(model,
                   pixel_idx, 
                   x_vec):
     model = model.to(device)
-    print(pixel_idx)
-    print(f"x_vec shape: {x_vec.shape}",flush = True)
+    print(f"condConf.predict pixel idx: {pixel_idx}")
+    #print(f"x_vec shape: {x_vec.shape}",flush = True)
     if config['condConf_basis_type'] != "linear":
       input_pixel = x_vec[pixel_idx]#.reshape(-1, 1)
     else:
       input_pixel = x_vec[pixel_idx,:].reshape(-1, 3)
     # Create inverse score function for the current pixel
     #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
+    score_defn = config['score_defn']
     _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model,
                                                                                     val_dataset_i, 
                                                                                     window_size, 
                                                                                     device, 
                                                                                     lambdas, 
-                                                                                    pixel_idx)
+                                                                                    pixel_idx,
+                                                                                    score_defn)
 
     # Generate the CondConf prediction set
     condConf_pset = condConf.predict(
         quantile=config['alpha'], 
         x_test=input_pixel, 
         score_inv_fn=nonconformity_score_inv_fn_modified, 
-        exact=False, 
-        randomize=False
+        exact=False,  # False
+        randomize=True # False
     )
 
     # save CUDA memory
@@ -307,7 +309,7 @@ def get_images_condConf(model,
       
 
 
-      model_prediction = model(x_full)[1] # can also be model.nested_sets(x_full.unsqueeze(0), lam=1) since nested_sets() performs prediction inside
+      model_prediction = model(x_full)[:,1,:,:,:] # can also be model.nested_sets(x_full.unsqueeze(0), lam=1) since nested_sets() performs prediction inside
 
       # Now apply the get_center_window function to the model prediction
       example_output = get_center_window(model_prediction.squeeze(), window_size)

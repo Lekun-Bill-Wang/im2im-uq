@@ -82,6 +82,7 @@ def get_config():
 
         # Beblow are parameters for calibration modifications:
         "UQ_method": "Cond CP" , # "Risk Control", "Cond CP"
+        "score_defn": "residual"
         "condConf_testing_mode": True,
         "num_calib_img": 2, # 30
         "num_val_img": 2, # 5
@@ -92,31 +93,57 @@ def get_config():
         }
   return config
 
-
 def get_img_generating_fname(config):
-  results_fname = (f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_{config['dataset']}_"
-                 f"{config['uncertainty_type']}_"
-                 f"{config['batch_size']}_"
-                 f"{config['lr']}_"
-                 f"{config['input_normalization']}_"
-                 f"({config['output_normalization'].replace('.', '_')})_"
-                 f"({config['num_calib_img']})_"
-                 f"({config['num_val_img']})_"
-                 f"{config['center_window_size']}_"
-                 f"{config['val_center_window_size']}_"
-                 f"{config['condConf_basis_type']}.pkl") # 
-  return results_fname
-
-
+    results_fname = (f"experiments/fastmri_test/outputs/raw/results_{config['dataset']}_" 
+                     f"{config['uncertainty_type']}_"
+                     f"{config['batch_size']}_"
+                     f"{config['lr']}_"
+                     f"{config['input_normalization']}_"
+                     f"({config['output_normalization'].replace('.', '_')})_"
+                     f"({config['num_calib_img']})_"
+                     f"({config['num_val_img']})_"
+                     f"{config['center_window_size']}_"
+                     f"{config['val_center_window_size']}_"
+                     f"{config['condConf_basis_type']}_"
+                     f"{config['score_defn']}_"
+                     f"{config['alpha']}.pkl")  # Modified alpha format
+    return results_fname
 
 def get_img_save_fname(config):
-  results_fname = (f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/images/{config['dataset']}_"
-                 f"({config['num_calib_img']})_"
-                 f"({config['num_val_img']})_"
-                 f"{config['center_window_size']}_"
-                 f"{config['val_center_window_size']}_"
-                 f"{config['condConf_basis_type']}") # 
-  return results_fname
+    results_fname = (f"experiments/fastmri_test/outputs/images/{config['dataset']}_"
+                     f"({config['num_calib_img']})_"
+                     f"({config['num_val_img']})_"
+                     f"{config['center_window_size']}_"
+                     f"{config['val_center_window_size']}_"
+                     f"{config['condConf_basis_type']}_"
+                     f"{config['score_defn']}_"
+                     f"{config['alpha']}")  # Modified alpha format
+    return results_fname
+
+# def get_img_generating_fname(config):
+#   results_fname = (f"experiments/fastmri_test/outputs/raw/results_{config['dataset']}_" # f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_{config['dataset']}_"
+#                  f"{config['uncertainty_type']}_"
+#                  f"{config['batch_size']}_"
+#                  f"{config['lr']}_"
+#                  f"{config['input_normalization']}_"
+#                  f"({config['output_normalization'].replace('.', '_')})_"
+#                  f"({config['num_calib_img']})_"
+#                  f"({config['num_val_img']})_"
+#                  f"{config['center_window_size']}_"
+#                  f"{config['val_center_window_size']}_"
+#                  f"{config['condConf_basis_type']}.pkl") # 
+#   return results_fname
+
+
+
+# def get_img_save_fname(config):
+#   results_fname = (f"experiments/fastmri_test/outputs/images/{config['dataset']}_"
+#                  f"({config['num_calib_img']})_"
+#                  f"({config['num_val_img']})_"
+#                  f"{config['center_window_size']}_"
+#                  f"{config['val_center_window_size']}_"
+#                  f"{config['condConf_basis_type']}") # 
+#   return results_fname
 
 if __name__ == "__main__":
   # Fix the randomness
@@ -128,20 +155,22 @@ if __name__ == "__main__":
   wandb.init(mode="offline",config=config) 
   print("wandb init.")
   # Check if results exist already
-  output_dir = wandb.config['output_dir'] 
+  output_dir = config['output_dir'] 
   #results_fname = output_dir + f'/results_' + wandb.config['dataset'] + "_" + wandb.config['uncertainty_type'] + "_" + str(wandb.config['batch_size']) + "_" + str(wandb.config['lr']) +"_" + wandb.config['input_normalization'] + "_" + wandb.config['output_normalization'].replace('.','_') + '.pkl'
-  results_fname = (f"{output_dir}/results_{wandb.config['dataset']}_"
-                 f"{wandb.config['uncertainty_type']}_"
-                 f"{wandb.config['batch_size']}_"
-                 f"{wandb.config['lr']}_"
-                 f"{wandb.config['input_normalization']}_"
-                 f"({wandb.config['output_normalization'].replace('.', '_')})_"
-                 f"({wandb.config['num_calib_img']})_"
-                 f"({wandb.config['num_val_img']})_"
-                 f"{wandb.config['center_window_size']}_"
-                 f"{wandb.config['val_center_window_size']}_"
-                 f"{wandb.config['condConf_basis_type']}.pkl") 
+  # results_fname = (f"{output_dir}/results_{wandb.config['dataset']}_"
+  #                f"{wandb.config['uncertainty_type']}_"
+  #                f"{wandb.config['batch_size']}_"
+  #                f"{wandb.config['lr']}_"
+  #                f"{wandb.config['input_normalization']}_"
+  #                f"({wandb.config['output_normalization'].replace('.', '_')})_"
+  #                f"({wandb.config['num_calib_img']})_"
+  #                f"({wandb.config['num_val_img']})_"
+  #                f"{wandb.config['center_window_size']}_"
+  #                f"{wandb.config['val_center_window_size']}_"
+  #                f"{wandb.config['condConf_basis_type']}.pkl") 
 
+  results_fname = (f"{get_img_generating_fname(config)}")
+  print(results_fname)
   
 
   #results_fname = get_img_generating_fname(wandb.config)
