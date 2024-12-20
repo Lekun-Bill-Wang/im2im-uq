@@ -44,7 +44,7 @@ def process_pixel(model,
       input_pixel = x_vec[pixel_idx]#.reshape(-1, 1)
     else:
       if handcrafted_basis != "handcrafted": # use NN basis
-        num_basis_components = config["d"]
+        num_basis_components = config["d"]+1 # +1 for constant part
       else:
         num_basis_components = len(config['basis_components'])
       input_pixel = x_vec[pixel_idx,:].reshape(-1, num_basis_components)
