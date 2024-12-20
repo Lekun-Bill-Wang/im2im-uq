@@ -188,9 +188,9 @@ def plot_correlation_from_results(results):
     condconf_basis_type = config['condConf_basis_type']
 
     # Unwrap the lists into flattened arrays
-    predictions = np.hstack([pred.flatten() for pred in results['predictions']])
-    condConf_lower = np.hstack([edge.flatten() for edge in results['condConf_lower_edge']])
-    condConf_upper = np.hstack([edge.flatten() for edge in results['condConf_upper_edge']])
+    predictions = np.hstack([pred.flatten().detach() for pred in results['predictions']])
+    condConf_lower = np.hstack([edge.flatten().detach() for edge in results['condConf_lower_edge']])
+    condConf_upper = np.hstack([edge.flatten().detach() for edge in results['condConf_upper_edge']])
     
     # Compute condConf sizes (upper - lower bounds)
     condConf_sizes = condConf_upper - condConf_lower
@@ -214,7 +214,6 @@ def plot_correlation_from_results(results):
     all_rel_abs_errors = np.array(all_rel_abs_errors)
     
     # Debugging: Print lengths of the arrays to ensure they match
-    print(f"Length of condConf_sizes: {len(condConf_sizes)}")
     print(f"Length of predictions: {len(predictions)}")
     print(f"Length of all_rel_abs_errors: {len(all_rel_abs_errors)}")
 
@@ -239,24 +238,24 @@ def plot_correlation_from_results(results):
         plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_predictions.png'), bbox_inches="tight")
         plt.close()
 
-    # 2. Scatter plot: condConf_sizes vs local 20*20 est. variances (skip if type isn't linear)
-    if condconf_basis_type == "linear" and len(condConf_sizes) == len(results['variances']):
-        variances = np.hstack([var.flatten() for var in results['variances']])
-        df_2 = pd.DataFrame({
-            'condConf_sizes': condConf_sizes,
-            'variances': variances
-        })
-        correlation_2 = df_2.corr(method='pearson')['condConf_sizes']['variances']
-        print(f"Pearson correlation (condConf_sizes vs variances): {correlation_2}")
+    # 2. Scatter plot: condConf_sizes vs local 20*20 estimated variances (skip if type isn't linear)
+    # if condconf_basis_type == "linear" and len(condConf_sizes) == len(results['variances']):
+    #     variances = np.hstack([var.flatten() for var in results['variances']])
+    #     df_2 = pd.DataFrame({
+    #         'condConf_sizes': condConf_sizes,
+    #         'variances': variances
+    #     })
+    #     correlation_2 = df_2.corr(method='pearson')['condConf_sizes']['variances']
+    #     print(f"Pearson correlation (condConf_sizes vs variances): {correlation_2}")
         
-        plt.figure(figsize=(10, 6))
-        sns.regplot(x='condConf_sizes', y='variances', data=df_2, scatter_kws={'s': 10}, line_kws={'color': 'red'})
-        plt.title(f'Correlation between condConf Sizes and Variances\nPearson correlation: {correlation_2:.2f}')
-        plt.xlabel('condConf Sizes')
-        plt.ylabel('Local 20*20 Estimated Variances')
-        plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
-        plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_variances.png'), bbox_inches="tight")
-        plt.close()
+    #     plt.figure(figsize=(10, 6))
+    #     sns.regplot(x='condConf_sizes', y='variances', data=df_2, scatter_kws={'s': 10}, line_kws={'color': 'red'})
+    #     plt.title(f'Correlation between condConf Sizes and Variances\nPearson correlation: {correlation_2:.2f}')
+    #     plt.xlabel('condConf Sizes')
+    #     plt.ylabel('Local 20*20 Estimated Variances')
+    #     plt.figtext(0.5, -0.1, config_caption, ha="center", fontsize=10, wrap=True)
+    #     plt.savefig(os.path.join(output_dir, 'condConf_sizes_vs_variances.png'), bbox_inches="tight")
+    #     plt.close()
 
     # 3. Scatter plot: condConf_sizes vs rel_abs_error
     if len(condConf_sizes) == len(all_rel_abs_errors):
@@ -305,7 +304,8 @@ def generate_config_caption():
     caption += f"Calib img size: {config['center_window_size']}\n"
     caption += f"Val img size: {config['val_center_window_size']}\n"
     caption += f"CondConf basis: {config['condConf_basis_type']}"
-    caption += f", Alpha: {config['alpha']}"
+    caption += f", Alpha={config['alpha']},  Base Model={config['model']}"
+
     return caption
 
 
@@ -338,33 +338,50 @@ def plot_images_uq_modified(results,
         foldername = os.path.join(base_output_path, f'{i}/')
         os.makedirs(foldername, exist_ok=True)
         # input
-        input_image = normalize_01(crop_to_val_window_size(results['inputs'][i].squeeze()))
+        input_image = normalize_01(crop_to_val_window_size(results['inputs'][i].squeeze())).detach()
         # model prediction
-        prediction = normalize_01(crop_to_val_window_size(results['predictions'][i].squeeze()))
+        prediction = normalize_01(crop_to_val_window_size(results['predictions'][i].squeeze())).detach()
         
         # condConf set sizes
-        condConf_set_sizes = (results['condConf_upper_edge'][i] - results['condConf_lower_edge'][i]).squeeze()
+        condConf_set_sizes = (results['condConf_upper_edge'][i] - results['condConf_lower_edge'][i]).squeeze().detach()
+        print(f"#######SHAPE OF CONDCONF SET SIZE: {condConf_set_sizes.shape}#######")
+        
+        # Compute 5-point summary
+        min_val = torch.min(condConf_set_sizes)
+        q1 = torch.quantile(condConf_set_sizes, 0.25)
+        median = torch.quantile(condConf_set_sizes, 0.5)
+        q3 = torch.quantile(condConf_set_sizes, 0.75)
+        max_val = torch.max(condConf_set_sizes)
+        # Print 5-point summary
+        print(f"5-point summary of condConf_set_sizes:")
+        print(f"  Min: {min_val.item()}")
+        print(f"  Q1: {q1.item()}")
+        print(f"  Median: {median.item()}")
+        print(f"  Q3: {q3.item()}")
+        print(f"  Max: {max_val.item()}")
+        # print(f"condConf_set_sizes = {condConf_set_sizes}")
+        
         # vanilla CP set sizes
         CP_set_sizes = (results['CP_upper_edge'][i] - results['CP_lower_edge'][i]).squeeze()
         # CP UQ visualization
         mixed_CP_prediction_set_sizes = weight_diff * torch.tensor(coolwarm_cmap(normalize_01(CP_set_sizes.squeeze()))) + weight_pred * prediction.unsqueeze(2)
         # confConf UQ visualization
-        mixed_condConf_prediction_set_sizes = weight_diff * torch.tensor(coolwarm_cmap(normalize_01(condConf_set_sizes.squeeze()))) + weight_pred * prediction.unsqueeze(2)
+        mixed_condConf_prediction_set_sizes = weight_diff * torch.tensor(coolwarm_cmap(normalize_01(condConf_set_sizes.squeeze().detach().numpy()))) + weight_pred * prediction.unsqueeze(2)
         # ground truth
-        gt = normalize_01(crop_to_val_window_size(results['gt'][i].squeeze()))
+        gt = normalize_01(crop_to_val_window_size(results['gt'][i].squeeze())).detach()
         # errors
-        diff = prediction - gt
+        diff = (prediction - gt).detach()
         abs_diff = torch.abs(diff)
         # Compute the (relative) error normalized absolute difference
         relative_abs_diff = abs_diff / torch.max(torch.max(prediction), torch.max(gt))
         normalized_abs_diff = normalize_01(abs_diff)
 
         # Map the normalized signed difference to the wildfire colormap
-        colored_diff = wildfire_cmap(normalize_01(diff))[:, :, :3]
+        colored_diff = wildfire_cmap(normalize_01(diff.numpy()))[:, :, :3]
         colored_diff_image = Image.fromarray((255 * colored_diff).astype('uint8')).convert('RGB')
 
         # Combine the colored signed difference with the prediction using weighted average
-        combined_diff_pred = (weight_diff * colored_diff + weight_pred * prediction.unsqueeze(2).numpy())
+        combined_diff_pred = (weight_diff * colored_diff + weight_pred * prediction.unsqueeze(2).detach().numpy())
         combined_diff_pred_image = Image.fromarray((255 * normalize_01(combined_diff_pred)).astype('uint8')).convert('RGB')
 
         # Create a colorbar for the combined_diff_pred image
@@ -377,7 +394,7 @@ def plot_images_uq_modified(results,
         # Create overlayed image
         overlayed_image = weight_gt * prediction + weight_abs_diff * normalized_abs_diff
         overlayed_image_normalized = normalize_01(overlayed_image)
-        overlayed_image_colormap = coolwarm_cmap(overlayed_image_normalized.numpy())[:, :, :3]  # Ignore alpha channel
+        overlayed_image_colormap = coolwarm_cmap(overlayed_image_normalized.detach().numpy())[:, :, :3]  # Ignore alpha channel
         # Additional images
         # bwr colormap applied to the ground truth image
         colored_gt = bwr_cmap(gt.numpy())[:, :, :3]
@@ -399,7 +416,7 @@ def plot_images_uq_modified(results,
        
 
         # If condConf_basis_type is not "linear", use the modified figure 10
-        if config['condConf_basis_type'] != "linear":
+        if (config['condConf_basis_type'] != "linear") or (config['handcrafted_basis_components'] != "handcrafted"):
             fig10_name = f"{weight_diff}*(pred-gt)+{weight_pred}*(pred)"
             fig10_image = (255 * combined_diff_pred).astype('uint8')
             grayscale_variances = None
@@ -408,7 +425,8 @@ def plot_images_uq_modified(results,
             fig10_image = (255 * normalize_01(mixed_condConf_prediction_set_sizes.cpu().numpy())).astype('uint8')
             variances = results['variances'][i].squeeze()  # Assuming variances is a tensor
             normalized_variances = normalize_01(variances)  # Normalize to [0, 1]
-            grayscale_variances = (255 * normalized_variances.numpy()).astype('uint8')  # Convert to grayscale
+            grayscale_variances = (255 * normalized_variances).astype('uint8')
+            #grayscale_variances = (255 * normalized_variances.numpy()).astype('uint8')  # Convert to grayscale
         
         
 
@@ -431,7 +449,7 @@ def plot_images_uq_modified(results,
             "rel_abs_diff * colored_gt (Rina)": (255 * rel_diff_mult_colored_gt).astype('uint8'),  # Fig 9
 
             # Fig 10-12 are for additional UQ visualizations (order reversed)
-            "grayscale_variances": grayscale_variances,  # Fig 10 (new)
+            # "grayscale_variances": grayscale_variances,  # Fig 10 (new)
             fig10_name: fig10_image,  # Adjusted Fig 10 depending on condConf_basis_type
             f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)": (255 * normalize_01(mixed_condConf_prediction_set_sizes.cpu().numpy())).astype('uint8'),  # Fig 11
             f"{weight_diff}*CP_sizes+{weight_pred}*(pred)": (255 * normalize_01(mixed_CP_prediction_set_sizes.cpu().numpy())).astype('uint8')  # Fig 12
@@ -468,7 +486,7 @@ def plot_images_uq_modified(results,
             "gt", "input", "prediction",
             "abs_diff_normalized", "condConf_set_sizes", "CP_set_sizes",
             "relative_abs_diff", "colored_gt", "rel_abs_diff * colored_gt (Rina)",
-            "grayscale_variances", f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)", f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"
+            fig10_name, f"{weight_diff}*condConf_sizes+{weight_pred}*(pred)", f"{weight_diff}*CP_sizes+{weight_pred}*(pred)"
         ]
         if config['condConf_basis_type'] != "linear":
           names[9] = fig10_name
@@ -582,7 +600,63 @@ def plot_images_uq_modified(results,
         thesis_grid_image.save(thesis_grid_image_path)
 
         # Optionally, print confirmation
-        print(f"Saved thesis grid image to {thesis_grid_image_path}")
+        print(f"Saved thesis grid image to {thesis_grid_image_path}") 
+
+
+
+        ###### Commented out due to testing NN basis (this only works for handcrafted basis)
+        # # Initialize grid_components for thesis grid
+        # grid_components = {
+        #     "xij": normalize_01(input_image.numpy()),
+        #     "var": normalize_01(results["variances"][i].squeeze()) if "variances" in results.keys() else None,
+        #     "blurred_xij": normalize_01(results["blurred_xij"][i].squeeze()) if "blurred_xij" in results.keys() else None,
+        #     "blurred_var": normalize_01(results["blurred_var"][i].squeeze())if "blurred_var" in results.keys() else None,
+        #     "condConf_set_sizes": normalize_01(condConf_set_sizes).numpy()
+        # }
+
+        # # Define image dimensions
+        # img_width, img_height = grid_components["condConf_set_sizes"].shape[1], grid_components["condConf_set_sizes"].shape[0]
+        # label_height = max([font.getsize(name)[1] for name in grid_components.keys()]) + 10  # Add padding for labels
+
+        # # Set up total grid dimensions
+        # thesis_img_width = img_width
+        # thesis_img_height = img_height
+        # thesis_total_width = 5 * (thesis_img_width + 2 * label_height + 50)
+        # thesis_total_height = thesis_img_height + 2 * label_height
+
+        # # Create the image grid
+        # thesis_grid_image = Image.new('RGB', (thesis_total_width, thesis_total_height), 'black')
+        # draw_thesis = ImageDraw.Draw(thesis_grid_image)
+
+        # # Define positions for the grid (1 row, 5 columns)
+        # thesis_positions = [
+        #     (col * (thesis_img_width + 2 * label_height + 50), 0) for col in range(5)
+        # ]
+
+        # # Paste images into the grid
+        # for pos, name in zip(thesis_positions, grid_components.keys()):
+        #     if grid_components[name] is not None:
+        #         sub_image = Image.fromarray((255 * grid_components[name]).astype('uint8')).convert('RGB')
+        #         thesis_grid_image.paste(sub_image, (pos[0] + label_height, pos[1] + label_height))
+        #         draw_thesis.text((pos[0] + 5, pos[1] + 5), name, font=font, fill="white")
+        #     else:
+        #         # Draw placeholder if the component is missing
+        #         draw_thesis.text((pos[0] + label_height, pos[1] + label_height), f"{name} not available", font=font, fill="white")
+
+        # # Save the additional grid
+        # thesis_grid_image_path = os.path.join(thesis_output_path, f"{i}_xij_var_grid.png")
+        # thesis_grid_image.save(thesis_grid_image_path)
+
+        # # Print confirmation
+        # print(f"Saved additional 1-by-5 grid image to {thesis_grid_image_path}")
+        
+
+
+
+        
+
+
+
 
 
 

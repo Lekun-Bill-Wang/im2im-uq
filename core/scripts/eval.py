@@ -9,7 +9,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from core.calibration.calibrate_model import get_rcps_loss_fn, get_rcps_metrics_from_outputs
 from core.utils import standard_to_minmax
 
-from core.calibration.calibrate_model_new import vectorize,  tensorize,  create_nonconformity_score_fns_modified,  generate_linear_phi_components, generate_const_phi_components, get_center_window
+from core.calibration.calibrate_model_new import vectorize,  tensorize,  create_nonconformity_score_fns_modified,  generate_linear_phi_components, generate_linear_phi_components_NN, generate_const_phi_components, get_center_window
 from core.condconf import CondConf
 import wandb
 import pdb
@@ -37,12 +37,17 @@ def process_pixel(model,
                   pixel_idx, 
                   x_vec):
     model = model.to(device)
-    print(f"condConf.predict pixel idx: {pixel_idx}")
+    #print(f"condConf.predict pixel idx: {pixel_idx}")
     #print(f"x_vec shape: {x_vec.shape}",flush = True)
+    handcrafted_basis = config["handcrafted_basis_components"]
     if config['condConf_basis_type'] != "linear":
       input_pixel = x_vec[pixel_idx]#.reshape(-1, 1)
     else:
-      input_pixel = x_vec[pixel_idx,:].reshape(-1, 3)
+      if handcrafted_basis != "handcrafted": # use NN basis
+        num_basis_components = config["d"]
+      else:
+        num_basis_components = len(config['basis_components'])
+      input_pixel = x_vec[pixel_idx,:].reshape(-1, num_basis_components)
     # Create inverse score function for the current pixel
     #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
     score_defn = config['score_defn']
@@ -60,7 +65,7 @@ def process_pixel(model,
         x_test=input_pixel, 
         score_inv_fn=nonconformity_score_inv_fn_modified, 
         exact=False,  # False
-        randomize=True # False
+        randomize=False # False
     )
 
     # save CUDA memory
@@ -81,7 +86,6 @@ def get_images_condConf_parallel(model,
     with torch.no_grad():
         model = model.to(device)
         window_size = config["val_center_window_size"]
-        variance_nbhd_size = config["var_window_size"]
         if model.lhat == None:
           if config["uncertainty_type"] != "softmax":
             lam = 1.0
@@ -104,16 +108,26 @@ def get_images_condConf_parallel(model,
         if condConf_basis_type != "linear":
             x_test = generate_const_phi_components(x_test, window_size)
         else:
-            x_test = generate_linear_phi_components(x_test, window_size,variance_nbhd_size)
+            handcrafted_basis = config["handcrafted_basis_components"]
+            if handcrafted_basis != "handcrafted": # use NN basis
+              d = config["d"]
+              x_test = x_test.to(device)
+              x_test = generate_linear_phi_components_NN(x_test, device, window_size, d)
+            else:  # use handcrafted basis
+              basis_components = config["basis_components"]
+              variance_nbhd_size = config["var_window_size"]
+               # Initialize optional lists only when required
+              all_variances = [] if ("var" in config["basis_components"]) and (condConf_basis_type == "linear") else None
+              all_blurred_vars = [] if ("blurred_var" in config["basis_components"]) and (condConf_basis_type == "linear") else None
+              all_blurred_xijs = [] if ("blurred_xij" in config["basis_components"]) and (condConf_basis_type == "linear") else None
+              x_test = generate_linear_phi_components(x_test, window_size,variance_nbhd_size,basis_components)
         
-        #y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1], window_size)) for i in range(len(val_dataset))])
         y_test = np.concatenate([vectorize(get_center_window(data[1], window_size)) for data in val_dataset])
 
         condConf_psets = []
         examples_output = []
-        all_variances = []  # To store local pixel intensity variances
-        store_variances = (condConf_basis_type == "linear")  # Only generate variances if condConf_basis_type is "linear"
 
+       
         print("    Computing condConf psets for val set.")
         length = window_size ** 2  # number of pixels in the current image
 
@@ -124,12 +138,29 @@ def get_images_condConf_parallel(model,
             end_idx = start_idx + length
             x_vec = x_test[start_idx:end_idx, :]  # get the phi components for the (img_idx)-th input image
 
-            # If we are generating variances, calculate them
-            if store_variances:
-                variances = x_vec[:,1]
-                variances = tensorize(variances, 1, window_size, window_size)
-            else:
-                variances = None  # Set variances to None if not "linear"
+
+            if (handcrafted_basis == "handcrafted") and (condConf_basis_type == "linear"):
+
+              # Compute variances if required
+              if all_variances is not None:
+                  variance_component_idx = config["basis_components"].index("var")
+                  variances = x_vec[:, variance_component_idx]
+                  variances = tensorize(variances, 1, window_size, window_size)
+                  all_variances.append(variances.cpu().numpy())
+
+              # Compute blurred_var if required
+              if all_blurred_vars is not None:
+                  blurred_var_component_idx = config["basis_components"].index("blurred_var")
+                  blurred_vars = x_vec[:, blurred_var_component_idx]
+                  blurred_vars = tensorize(blurred_vars, 1, window_size, window_size)
+                  all_blurred_vars.append(blurred_vars.cpu().numpy())
+
+              # Compute blurred_xij if required
+              if all_blurred_xijs is not None:
+                  blurred_xij_component_idx = config["basis_components"].index("blurred_xij")
+                  blurred_xijs = x_vec[:, blurred_xij_component_idx]
+                  blurred_xijs = tensorize(blurred_xijs, 1, window_size, window_size)
+                  all_blurred_xijs.append(blurred_xijs.cpu().numpy())
 
             # Get (img_idx)-th validation image
             val_dataset_i = val_dataset[img_idx]
@@ -149,230 +180,177 @@ def get_images_condConf_parallel(model,
 
             # Get model's prediction on the downsampled input
             x_full = val_dataset[img_idx][0].unsqueeze(0).to(device)
-            model_prediction = model(x_full)[:,1,:,:,:]  # Get model prediction
+            if config["model"] == "trivialModel":
+                model_prediction = x_full
+            else:
+                model_prediction = model(x_full)[:, 1, :, :, :]  # Get model prediction
 
             # Apply the get_center_window function to the model prediction
             example_output = get_center_window(model_prediction.squeeze(), window_size)
-           
+
             # Combine the lower, middle, and upper predictions into a single tensor
             combined_output = torch.stack([condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()], dim=0)
             examples_output.append(combined_output)
 
-            # Store variances if they were calculated
-            if store_variances:
-                all_variances.append(variances.cpu().numpy())
-            else:
-                all_variances.append(None)
-
         examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
-        examples_variance = [torch.tensor(v) if v is not None else None for v in all_variances]  # Ensure we handle None cases
         examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
-        #inputs = [val_dataset[img_idx][0][0] if val_dataset[0][0].shape[0] > 1 else val_dataset[img_idx][0] for img_idx in idx_iterator]
-        inputs      = [val_dataset[img_idx][0] for img_idx in idx_iterator]
-        
+        inputs = [val_dataset[img_idx][0] for img_idx in idx_iterator]
+
+        # Build the raw_images_dict
         raw_images_dict = {
             'inputs': inputs,
             'gt': examples_gt,
             'predictions': [example[1] for example in examples_output],
             'condConf_lower_edge': [example[0] for example in examples_output],
             'condConf_upper_edge': [example[2] for example in examples_output],
-            'variances': examples_variance  # Saving the variances or None
         }
+
+        # Add optional components only if they were created
+        if (handcrafted_basis == "handcrafted") and (condConf_basis_type == "linear"):
+          if all_variances is not None:
+              raw_images_dict['variances'] = [variance for variance in all_variances]
+          if all_blurred_vars is not None:
+              raw_images_dict['blurred_var'] = [blurred_var for blurred_var in all_blurred_vars] 
+          if all_blurred_xijs is not None:
+              raw_images_dict['blurred_xij'] = [blurred_xij for blurred_xij in all_blurred_xijs]  
 
         try:
             val_dataset.reset()
-        except:
-            pass
+        except AttributeError:
+            print("Warning: val_dataset does not have a reset method.")
 
         return raw_images_dict
 
 
 
 
-def get_images_condConf(model,
-                        val_dataset,
-                        device, 
-                        idx_iterator,  
-                        config, 
-                        lambdas, 
-                        condConf):
-  print(f"Entered condConf pset generation for val set.")
-  with torch.no_grad():
-    model = model.to(device)
-    window_size = config["val_center_window_size"]
-    variance_nbhd_size = config["var_window_size"]
-    lam = None
-    if model.lhat == None:
-      if config["uncertainty_type"] != "softmax":
-        lam = 1.0
-      else:
-        lam = 0.99
 
-    try:
-      # If dataset is iterable, create a list of outputs
-      my_iter = iter(val_dataset)
-      print(f"Number of val images is: {len(idx_iterator)}")
-      val_dataset = [next(my_iter) for img_idx in idx_iterator]
-    except:
-      pass
+def get_images_condConf_non_parallel(model, 
+                                     val_dataset, 
+                                     device, 
+                                     idx_iterator, 
+                                     config, 
+                                     lambdas, 
+                                     condConf):
+    print(f"Entered condConf pset generation for validation set.")
+    with torch.no_grad():
+        model = model.to(device)
+        window_size = config["val_center_window_size"]
+        if model.lhat == None:
+            if config["uncertainty_type"] != "softmax":
+                lam = 1.0
+            else:
+                lam = 0.99
 
-    # From the condConf object built on the calib set and form prediction sets of each 
-    # image in the validation set (after vectorizing), and then tensorizing the prediction sets
-    # back to the form like examples_output, make sure the result can be used the same as examples_output below
-    
-    # for each (x,label) in val_dataset, vectorize x, then generate the condConf prediction set using 
-    # condConf_pset = condConf.predict(res = cond_conf.predict(alpha / 2, x, nonconformity_score_inv_fn, exact=True, randomize=True)
-    # where condConf_pset[0], condConf_pset[1] will contain lower and upper bounds of the predidction sets, each of the same length as x.
-    # Also, get the model's prediction on x (using model.nested_sets with lam=1, see examples_output below) and take the middle slice.
+        try:
+            my_iter = iter(val_dataset)
+            print(f"Number of val images is: {len(idx_iterator)}")
+            val_dataset = [next(my_iter) for img_idx in idx_iterator]
+        except:
+            pass
 
-    # After you get condConf_pset for each data point, reshape it into a 3 * I * J tensor so that
-    # condConf_pset[0] is lower bound, condConf_pset[1] is model's prediction, and condConf_pset[2] is upper bound
+        num_val_images = len(val_dataset)
+        print("    Generate val set for condConf.")
+        x_test = torch.stack([data[0] for data in val_dataset])
 
-    # At the end, connect all tensors into a (num_val_images, 3 ,I ,J) tensor where num_val_images is 
-    # the length of the validation set, and unsqueeze(0) to make sure this final tensor is 5-way as in 
-    # the output of nested_sets (as our images are grayscale not RGB), and 
+        condConf_basis_type = config['condConf_basis_type']
+        if condConf_basis_type != "linear":
+            x_test = generate_const_phi_components(x_test, window_size)
+        else:
+            handcrafted_basis = config["handcrafted_basis_components"]
+            if handcrafted_basis != "handcrafted":
+                d = config["d"]
+                x_test = x_test.to(device)
+                x_test = generate_linear_phi_components_NN(x_test, device, window_size, d)
+            else:
+                basis_components = config["basis_components"]
+                variance_nbhd_size = config["var_window_size"]
+                x_test = generate_linear_phi_components(x_test, window_size, variance_nbhd_size, basis_components)
 
+        y_test = np.concatenate([vectorize(get_center_window(data[1], window_size)) for data in val_dataset])
 
-    # ORIGINAL (no condConf) VERSION: examples_output = [model.nested_sets((val_dataset[img_idx][0].unsqueeze(0).to(device),),lam=lam) for img_idx in idx_iterator]
-    # unsqueeze since nested_sets expects and outputs 5-way tensor (first way being RGB, here we don't have that)
-    
-    # obtain nonconformity score functions
-    #I, J = val_dataset[0][0].shape[-2], val_dataset[0][0].shape[-1] # get image sizes
-    num_val_images = len(val_dataset)
-    print("    Generate val set for condConf.")
-    x_test = torch.stack([data[0] for data in val_dataset])
-    x_test = generate_linear_phi_components(x_test, window_size, variance_nbhd_size)
-    y_test = np.concatenate([vectorize(get_center_window(val_dataset[i][1],window_size)) for i in range(len(val_dataset))])
+        condConf_psets = []
+        examples_output = []
 
+        print("    Computing condConf psets for val set.")
+        length = window_size ** 2
 
-    condConf_psets = []
-    examples_output = []
+        for img_idx in idx_iterator:
+            print(f"    Compute pset for the {img_idx+1}-th val image")
+            start_idx = img_idx * length
+            end_idx = start_idx + length
+            x_vec = x_test[start_idx:end_idx, :]
 
+            if (handcrafted_basis == "handcrafted") and (condConf_basis_type == "linear"):
+                if "var" in config["basis_components"]:
+                    variance_component_idx = config["basis_components"].index("var")
+                    variances = x_vec[:, variance_component_idx]
+                    variances = tensorize(variances, 1, window_size, window_size)
+                if "blurred_var" in config["basis_components"]:
+                    blurred_var_component_idx = config["basis_components"].index("blurred_var")
+                    blurred_vars = x_vec[:, blurred_var_component_idx]
+                    blurred_vars = tensorize(blurred_vars, 1, window_size, window_size)
+                if "blurred_xij" in config["basis_components"]:
+                    blurred_xij_component_idx = config["basis_components"].index("blurred_xij")
+                    blurred_xijs = x_vec[:, blurred_xij_component_idx]
+                    blurred_xijs = tensorize(blurred_xijs, 1, window_size, window_size)
 
-    print("    Computing condConf psets for val set.")
-    # Loop through validation dataset
-    for img_idx in idx_iterator:
-      print(f"    Compute pset for the {img_idx+1}-th val image")
-      length = window_size ** 2
-      start_idx = img_idx * length
-      end_idx = start_idx + length
-      x_vec = x_test[start_idx:end_idx,:]
-      print(f"        Shape of the the {img_idx+1}-th val x_test: {x_vec.shape}")
+            val_dataset_i = val_dataset[img_idx]
 
-      #labels = val_dataset[img_idx][1].unsqueeze(0).to(device)  # Ground truth label
-            
-      
-      #x_vec = vectorize(x)
+            all_lower_bounds = []
+            all_upper_bounds = []
 
-      # Generate the CondConf prediction set
-      val_dataset_i = val_dataset[img_idx]
-      
-      # print(f"        Shape of the the {img_idx+1}-th data point in val_dataset: {(val_dataset_i[0].shape,val_dataset_i[1].shape)}")
-      
-      # Initialize lists for CondConf prediction sets and model predictions
-      
+            for pixel_idx in range(length):
+                lower_bound, upper_bound = process_pixel(
+                    model, condConf, config, lambdas, window_size, device, val_dataset_i, pixel_idx, x_vec
+                )
+                all_lower_bounds.append(lower_bound)
+                all_upper_bounds.append(upper_bound)
 
-      all_lower_bounds = []
-      all_upper_bounds = []
-      # loop through the current window's pixels
-      for pixel_idx in tqdm(range(length)): 
-        # Note that condConf.predict() can onl take ONE test point, so in our case, just one pixel, 
-        # so this inner loop through each pixels of the current val image is needed.
-        input_pixel = x_vec[pixel_idx,:].reshape(-1,3)
-        #print(f"            Create inv score function for {pixel_idx+1}-th pixel.")
-        _, nonconformity_score_inv_fn_modified = create_nonconformity_score_fns_modified(model, val_dataset_i, window_size,  device, lambdas, pixel_idx)
-        #print(f"            Compute condConf pset for {pixel_idx+1}-th pixel.")
+            condConf_pset_lower = np.concatenate(all_lower_bounds)
+            condConf_pset_upper = np.concatenate(all_upper_bounds)
+            condConf_lower_bound = tensorize(condConf_pset_lower, 1, window_size, window_size)
+            condConf_upper_bound = tensorize(condConf_pset_upper, 1, window_size, window_size)
 
-        
-        condConf_pset = condConf.predict(quantile=config['alpha'], x_test=input_pixel, 
-                                             score_inv_fn=nonconformity_score_inv_fn_modified, 
-                                             exact=False, randomize=False)
-                                             
-        all_lower_bounds.append(condConf_pset[0])
-        all_upper_bounds.append(condConf_pset[1])
+            x_full = val_dataset[img_idx][0].unsqueeze(0).to(device)
+            if config["model"] == "trivialModel":
+                model_prediction = x_full
+            else:
+                model_prediction = model(x_full)[:, 1, :, :, :]
 
-      
+            example_output = get_center_window(model_prediction.squeeze(), window_size)
+            combined_output = torch.stack([
+                condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()
+            ], dim=0)
+            examples_output.append(combined_output)
 
-      # Tensorize the condConf prediction set to image forms
-      condConf_pset_lower =  np.concatenate(all_lower_bounds)
-      condConf_pset_upper =  np.concatenate(all_upper_bounds)
-      # def tensorize(vector, num_images, channels=None, I=None, J=None):
-      condConf_lower_bound = tensorize(condConf_pset_lower, 1, window_size, window_size)
-      condConf_upper_bound = tensorize(condConf_pset_upper, 1, window_size, window_size)
-      #print(f"        Shape of condconf lower bound: {condConf_lower_bound.shape}")
-            
-      # Get model's prediction on the original image using nested_sets
-      x_full = val_dataset[img_idx][0].unsqueeze(0).to(device)  # Image
-      #example_output = model.nested_sets(x_full.unsqueeze(0), lam=1) # model.nested_sets(x_full, lam=1)
-      #model_prediction = example_output[:,1,:,:,:]  # The middle slice 
-   
-      
+        examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
+        examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
+        inputs = [val_dataset[img_idx][0] for img_idx in idx_iterator]
 
+        raw_images_dict = {
+            'inputs': inputs,
+            'gt': examples_gt,
+            'predictions': [example[1] for example in examples_output],
+            'condConf_lower_edge': [example[0] for example in examples_output],
+            'condConf_upper_edge': [example[2] for example in examples_output],
+        }
 
-      model_prediction = model(x_full)[:,1,:,:,:] # can also be model.nested_sets(x_full.unsqueeze(0), lam=1) since nested_sets() performs prediction inside
+        if (handcrafted_basis == "handcrafted") and (condConf_basis_type == "linear"):
+            if "var" in config["basis_components"]:
+                raw_images_dict['variances'] = [variance for variance in all_variances]
+            if "blurred_var" in config["basis_components"]:
+                raw_images_dict['blurred_var'] = [blurred_var for blurred_var in all_blurred_vars]
+            if "blurred_xij" in config["basis_components"]:
+                raw_images_dict['blurred_xij'] = [blurred_xij for blurred_xij in all_blurred_xijs]
 
-      # Now apply the get_center_window function to the model prediction
-      example_output = get_center_window(model_prediction.squeeze(), window_size)
-      # Combine the lower, middle, and upper predictions into a single tensor
-      combined_output = torch.stack([condConf_lower_bound.cpu(), example_output.unsqueeze(0).cpu(), condConf_upper_bound.cpu()], dim=0)
+        try:
+            val_dataset.reset()
+        except AttributeError:
+            print("Warning: val_dataset does not have a reset method.")
 
-      # Append the tensor to the list
-      #condConf_psets.append(combined_output)
-      #examples_output.append(example_output)
+        return raw_images_dict
 
-      examples_output.append(combined_output)
-
-    # Stack all prediction sets into a single tensor for easy processing
-    #condConf_psets = torch.stack(condConf_psets).unsqueeze(1)  # 5D tensor
-    examples_output = [torch.stack([example[0], example[1], example[2]], dim=0) for example in examples_output]
-      
-
-
-
-    
-    # adjust for center_window cropping
-    examples_gt = [val_dataset[img_idx][1] for img_idx in idx_iterator]
-    if val_dataset[0][0].shape[0] > 1:
-      inputs = [val_dataset[img_idx][0][0] for img_idx in idx_iterator]
-    else:
-      inputs = [val_dataset[img_idx][0] for img_idx in idx_iterator]
-    raw_images_dict = {'inputs': inputs, 
-                       'gt': examples_gt,
-                       'predictions': [example[1] for example in examples_output], 
-                       'condConf_lower_edge': [example[0] for example in examples_output], 
-                       'condConf_upper_edge': [example[2] for example in examples_output] 
-                      }
-
-    # if val_dataset[0][0].shape[0] > 1:
-    #   examples_input = [wandb.Image(transform_output(val_dataset[img_idx][0][0])) for img_idx in idx_iterator]
-    # else:
-    #   examples_input = [wandb.Image(transform_output(val_dataset[img_idx][0])) for img_idx in idx_iterator]
-    #test_img = transform_output(examples_output[0])
-    #print(f"Shape of test_img into wandb.Image(): {test_img.shape}")
-
-    # # disable computation for wandb
-    # examples_lower_edge = [wandb.Image(transform_output(example[0])) for example in examples_output]
-    # examples_prediction = [wandb.Image(transform_output(example[1])) for example in examples_output]
-    # examples_upper_edge = [wandb.Image(transform_output(example[2])) for example in examples_output]
-    # examples_ground_truth = [wandb.Image(transform_output(val_dataset[img_idx][1])) for img_idx in idx_iterator]
-
-    # # Calculate lengths on their own scales
-    # lower_lengths = [example[1]-example[0] for example in examples_output]
-    # lower_lengths = [transform_output(lower_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()), self_normalize=False) for i in range(len(examples_output))]
-    # #lower_lengths = [lower_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()) for i in range(len(examples_output))]
-    # upper_lengths = [example[2]-example[1] for example in examples_output]
-    # upper_lengths = [transform_output(upper_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()), self_normalize=False) for i in range(len(examples_output))]
-    # #upper_lengths = [upper_lengths[i]/(examples_output[i][1].max()-examples_output[i][1].min()) for i in range(len(examples_output))]
-
-    # examples_lower_length = [wandb.Image(ll) for ll in lower_lengths]
-    # examples_upper_length = [wandb.Image(ul) for ul in upper_lengths]
-
-    try:
-      val_dataset.reset()
-    except:
-      pass
-
-    return raw_images_dict
 
 
 

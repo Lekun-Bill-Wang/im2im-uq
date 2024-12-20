@@ -11,8 +11,7 @@ from core.calibration.bounds import HB_mu_plus
 import pdb
 
 # for conditional conf
-from conditionalconformal.synthetic_data import generate_cqr_data, indicator_matrix
-from conditionalconformal import CondConf
+from core.condconf import CondConf
 
 def get_rcps_losses(model, dataset, rcps_loss_fn, lam, device):
   losses = []

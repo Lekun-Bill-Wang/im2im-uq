@@ -6,17 +6,22 @@ import wandb
 import random
 import copy
 import numpy as np
+from numpy.fft import fft2, ifft2, fftshift, ifftshift
+
 import pickle as pkl
 import torch
+import torch.nn as nn
+import cv2
 from torch.utils.data import Dataset, DataLoader
 import torchvision 
-import torchvision.transforms as T
+import torchvision.transforms as TVtransforms
+import torchvision.transforms.functional as TVtransformsFctl
 import warnings
 import yaml
 
 #from core.scripts.train import train_net
 from core.scripts.train_mri_offline import train_net
-from core.scripts.eval import get_images, get_images_condConf, get_images_condConf_parallel, eval_net, get_loss_table, eval_set_metrics 
+from core.scripts.eval import get_images,  get_images_condConf_parallel, eval_net, get_loss_table, eval_set_metrics ,get_images_condConf_non_parallel
 from core.models.add_uncertainty import add_uncertainty
 from core.calibration.calibrate_model_new import calibrate_model, calibrate_model_by_CP, calibrate_model_by_CondConf
 from core.utils import fix_randomness 
@@ -51,50 +56,61 @@ def get_config():
     "output_dir": "experiments/fastmri_test/outputs/raw",
     "dataset": "fastmri",
     "num_inputs":1,
-        "data_split_percentages": [0.9, 0.01, 0.01, 0.08], # model_tr, calib, val(plot), unused
-        "model": "UNet",
-        "uncertainty_type": "quantiles",
-        "alpha":0.1,
-        "delta": 0.1, # only for RCPS
-        "num_lambdas": 2000,
-        "rcps_loss":  "fraction_missed",
-        "minimum_lambda_softmax": 0,
-        "maximum_lambda_softmax":  1.2,
-        "minimum_lambda": 0,
-        "maximum_lambda": 20,
-        "device": "cuda:0",
-        "epochs": 10,
-        "batch_size": 16, # for UNet training
-        "lr": 0.001, # 0.001, 0.0001 # learning rate
-        "load_from_checkpoint":  True,
-        "checkpoint_dir": "experiments/fastmri_test/checkpoints",
-        "checkpoint_every": 1,
-        "validate_every": 10,
-        "num_validation_images":10, # for final image saving in eval.py
-        "q_lo": 0.05,
-        "q_hi": 0.95,
-        "q_lo_weight":  1,
-        "q_hi_weight": 1,
-        "mse_weight": 1,
-        "num_softmax": 50,
-        "input_normalization": "standard",
-        "output_normalization":  "min-max",
+    "data_split_percentages": [0.8, 0.1, 0.1, 0.0], # model_tr, calib, val(plot), unused
+    "model": "UNet", # "UNet" "trivialModel"
+        # Note that trivialModel means the base prediction model will return the blurred ground truth,
+        # this is implemented by directly modifying the score functions instead of 
+        # defining a trivial constant model, and this must be used along with a trivialDataset
+        # where each pair of data is (blurred ground truth, groud truth)
+    "uncertainty_type": "quantiles",
+    "alpha":0.1,
+    "delta": 0.1, # only for RCPS
+    "num_lambdas": 2000,
+    "rcps_loss":  "fraction_missed",
+    "minimum_lambda_softmax": 0,
+    "maximum_lambda_softmax":  1.2,
+    "minimum_lambda": 0,
+    "maximum_lambda": 20,
+    "device": "cuda:0",
+    "epochs": 10,
+    "batch_size": 16, # for UNet training
+    "lr": 0.001, # 0.001, 0.0001 # learning rate
+    "load_from_checkpoint":  True,
+    "checkpoint_dir": "experiments/fastmri_test/checkpoints",
+    "checkpoint_every": 1,
+    "validate_every": 10,
+    "num_validation_images":10, # for final image saving in eval.py
+    "q_lo": 0.05,
+    "q_hi": 0.95,
+    "q_lo_weight":  1,
+    "q_hi_weight": 1,
+    "mse_weight": 1,
+    "num_softmax": 50,
+    "input_normalization": "standard",
+    "output_normalization":  "min-max",
 
-        # Beblow are parameters for calibration modifications:
-        "UQ_method": "Cond CP" , # "Risk Control", "Cond CP"
-        "score_defn": "residual"
-        "condConf_testing_mode": True,
-        "num_calib_img": 2, # 30
-        "num_val_img": 2, # 5
-        "condConf_basis_type": "const", # "linear" # const
-        "center_window_size": 40 ,# side length of center window for calibration set
-        "val_center_window_size": 40, # 200 # side length of center window for validation set
-        "var_window_size": 20 # side length of sliding variance window
-        }
+    # Beblow are parameters for calibration modifications:
+    "UQ_method": "Cond CP" , # "Risk Control", "Cond CP"
+    "score_defn": "residual", # "heuristic"
+    "condConf_testing_mode": True,
+    "testing_by_shifting": "no_shift", # "no_shift" # whether input imgaes on calib and val sets have been randomly shifted
+    "num_calib_img": 5, # 30
+    "num_val_img": 2, # 5
+    "condConf_basis_type": "linear",# "linear" # const
+    "handcrafted_basis_components": "NN_basis", #"handcrafted"
+    "center_window_size": 40 ,# side length of center window for calibration set
+    "val_center_window_size": 50 # 200 # side length of center window for validation set
+  }
+  if config["handcrafted_basis_components"] == "handcrafted":
+    config["basis_components"] = ["const","xij","var","blurred_xij","blurred_var"]
+    config["var_window_size"]= 5 # side length of sliding variance window
+  if config["handcrafted_basis_components"] == "NN_basis":
+    config["d"]=3
   return config
 
 def get_img_generating_fname(config):
-    results_fname = (f"experiments/fastmri_test/outputs/raw/results_{config['dataset']}_" 
+    results_fname = (f"experiments/fastmri_test/outputs/raw/results_{config['dataset']}_"
+                     f"{config['model']}_"
                      f"{config['uncertainty_type']}_"
                      f"{config['batch_size']}_"
                      f"{config['lr']}_"
@@ -106,44 +122,209 @@ def get_img_generating_fname(config):
                      f"{config['val_center_window_size']}_"
                      f"{config['condConf_basis_type']}_"
                      f"{config['score_defn']}_"
+                     f"{config['testing_by_shifting']}_"
+                     f"({config['handcrafted_basis_components']})_" #f"({','.join(config['handcrafted_basis_components'])})_"
                      f"{config['alpha']}.pkl")  # Modified alpha format
     return results_fname
 
 def get_img_save_fname(config):
     results_fname = (f"experiments/fastmri_test/outputs/images/{config['dataset']}_"
+                     f"{config['model']}_"
                      f"({config['num_calib_img']})_"
                      f"({config['num_val_img']})_"
                      f"{config['center_window_size']}_"
                      f"{config['val_center_window_size']}_"
                      f"{config['condConf_basis_type']}_"
                      f"{config['score_defn']}_"
+                     f"{config['testing_by_shifting']}_"
+                     f"({config['handcrafted_basis_components']})_"#f"({','.join(config['handcrafted_basis_components'])})_"
                      f"{config['alpha']}")  # Modified alpha format
     return results_fname
 
-# def get_img_generating_fname(config):
-#   results_fname = (f"experiments/fastmri_test/outputs/raw/results_{config['dataset']}_" # f"/project2/rina/lekunbillwang/im2im-uq/experiments/fastmri_test/outputs/raw/results_{config['dataset']}_"
-#                  f"{config['uncertainty_type']}_"
-#                  f"{config['batch_size']}_"
-#                  f"{config['lr']}_"
-#                  f"{config['input_normalization']}_"
-#                  f"({config['output_normalization'].replace('.', '_')})_"
-#                  f"({config['num_calib_img']})_"
-#                  f"({config['num_val_img']})_"
-#                  f"{config['center_window_size']}_"
-#                  f"{config['val_center_window_size']}_"
-#                  f"{config['condConf_basis_type']}.pkl") # 
-#   return results_fname
+
+
+def normalize_01(x):
+  x = x - x.min()
+  x = x / x.max()
+  return x
+
+def random_shift_input_images(dataset, num_shifts=3, max_shift=0.2, renormalize=False):
+    """
+    Take all the input images in the grayscale dataset (assumed to be PyTorch tensors), 
+    and return a dataset where each input image is the AVERAGE of several randomly shifted
+    versions of itself. The result is a single grayscale image for each input that represents 
+    the overlap of multiple shifts.
+    
+    Parameters:
+    - dataset: A tuple or list-like structure, where dataset[0] contains input grayscale images as tensors.
+    - num_shifts: The number of random shifts to generate and overlap for each image.
+    - max_shift: Maximum allowed fraction of height & width of shiftings
+    - renormalize: Whether to normalize before and after shifting if there are negative values
+    
+    Returns:
+    - shifted_dataset: The dataset with all input images being the overlap of several shifted versions.
+    """
+    shifted_images = []
+    labels = []
+
+    # Loop through the dataset and apply the random shifts
+    for idx in range(len(dataset)):
+        image, label = dataset[idx]  # Assuming each dataset item is (image, label) pair
+        print(image.shape)
+        
+        # Ensure the image has the right shape: (channels, height, width)
+        if len(image.shape) == 2:  # If it's a 2D grayscale image, add a channel dimension
+            image = image.unsqueeze(0) # image.shape = (nchanel, height, width)
+
+        # Calculate the original min and max values for renormalization
+        original_min, original_max = image.min(), image.max()
+        
+        # Check if there are any negative values in the image
+        if renormalize and torch.any(image < 0):
+            print("Normalizing to (0,1) before random shifting")
+            image = normalize_01(image)
+
+        # Convert tensor to PIL image (ensure the input is in the correct format)
+        image_pil = TVtransforms.ToPILImage()(image)
+
+        # Deep copy for accumulation
+        # accumulated_image = image.clone()  
+        # accumulated_image = TVtransforms.ToPILImage()(accumulated_image)
+        # accumulated_image = TVtransforms.ToTensor()(accumulated_image)
+
+
+        # Calculate the minimum pixel intensity for padding
+        min_intensity = float(image.min().item())
+
+        accumulated_image = torch.zeros_like(image)
+        for idx in range(num_shifts):
+            # Apply RandomAffine with the minimum intensity as padding
+            transform = TVtransforms.RandomAffine(degrees=0, translate=(max_shift, max_shift)) #, fill=min_intensity
+            shifted_image = transform(image_pil)
+            shifted_image = TVtransforms.ToTensor()(shifted_image) + 1e-6
+            if idx == 0:
+              accumulated_image = shifted_image
+            else:
+              accumulated_image += shifted_image
+
+        # Divide by the number of random shifts performed 
+        accumulated_image /= num_shifts # (num_shifts + 1)
+
+        # Rescale accumulated image back to the original (min, max) range
+        if renormalize and torch.any(image < 0):
+            print("Normalizing back to original scale after random shifting")
+            accumulated_image = accumulated_image * (original_max - original_min) + original_min
+
+        # Add the shifted image and the corresponding label to the new dataset lists
+        shifted_images.append(accumulated_image)
+        labels.append(label)
+
+    # Create a new dataset with the shifted images and original labels
+    shifted_dataset = [(image, label) for image, label in zip(shifted_images, labels)]
+    
+    return shifted_dataset
 
 
 
-# def get_img_save_fname(config):
-#   results_fname = (f"experiments/fastmri_test/outputs/images/{config['dataset']}_"
-#                  f"({config['num_calib_img']})_"
-#                  f"({config['num_val_img']})_"
-#                  f"{config['center_window_size']}_"
-#                  f"{config['val_center_window_size']}_"
-#                  f"{config['condConf_basis_type']}") # 
-#   return results_fname
+def random_shift_input_images_by_padding(dataset, num_shifts=5, max_shift=0.01,renormalize = False):
+    """
+    Take all the input images in the grayscale dataset (assumed to be PyTorch tensors), 
+    and return a dataset where each input image is the AVERAGE of several randomly shifted
+    versions of itself. The result is a single grayscale image for each input that represents 
+    the overlap of multiple shifts.
+    
+    Parameters:
+    - dataset: A tuple or list-like structure, where dataset[0] contains input grayscale images as tensors.
+    - num_shifts: The number of random shifts to generate and overlap for each image.
+    - max_shift: Maximum allowed fraction of height & width of shiftings
+    - renormalize: Whether to normalize before and after shifting if there are negative values
+    
+    Returns:
+    - shifted_dataset: The dataset with all input images being the overlap of several shifted versions.
+    """
+    shifted_images = []
+    labels = []
+
+    # Loop through the dataset and apply the random shifts
+    for idx in range(len(dataset)):
+        image, label = dataset[idx]  # Assuming each dataset item is (image, label) pair
+        print(image.shape)
+        
+        # Ensure the image has the right shape: (channels, height, width)
+        if len(image.shape) == 2:  # If it's a 2D grayscale image, add a channel dimension
+            image = image.unsqueeze(0) # image.shape = (nchanel, height, width)
+        _, height, width = image.shape
+
+        # Calculate the original min and max values for renormalization
+        original_min, original_max = image.min(), image.max()
+
+        # Calculate the minimum pixel intensity for padding
+        min_intensity = float(image.min().item())
+
+        accumulated_image = torch.zeros_like(image)
+        shifts = [] 
+        for idx in range(num_shifts):
+            # Calculate maximum pixel shifts
+            max_dx = int(max_shift * width)
+            max_dy = int(max_shift * height)
+
+            # Randomly choose shift amounts
+            dx = random.randint(-max_dx, max_dx) # dx > 0 = shift to the right by dx; dx < 0 = shift to left by |dx|
+            dy = random.randint(-max_dy, max_dy) # dy > 0 = shift up
+            shifts.append((dx, dy))  # Track shift applied
+            print((dx,dy))
+
+            # Shift image by padding and slicing
+            padding = (max(dx, 0), max(-dx, 0), max(-dy, 0), max(dy, 0))
+            #print(padding)
+            shifted_image = torch.nn.functional.pad(image, padding, mode="constant", value=min_intensity)
+            #print(shifted_image.shape)
+
+            # Crop to original dimensions after padding
+            shifted_image = shifted_image[:, max(dy, 0):(height + max(dy, 0)), max(-dx, 0):(width + max(-dx, 0))]
+            #print(shifted_image.shape)
+            if idx == 0:
+              accumulated_image = shifted_image
+            else:
+              accumulated_image += shifted_image
+
+        # Divide by the number of random shifts performed 
+        accumulated_image /= num_shifts # (num_shifts + 1)
+         # Print the five-point summaries for input and blurred images
+        input_summary = torch.quantile(image, torch.tensor([0, 0.25, 0.5, 0.75, 1.0]))
+        blurred_summary = torch.quantile(accumulated_image, torch.tensor([0, 0.25, 0.5, 0.75, 1.0]))
+
+        print(f"Input intensity: {input_summary}")
+        print(f"Re-blurred intensity: {blurred_summary}")
+        print(f"Shifts applied (dx, dy): {shifts}")
+
+        # Add the shifted image and the corresponding label to the new dataset lists
+        shifted_images.append(accumulated_image)
+        labels.append(label)
+
+    # Create a new dataset with the shifted images and original labels
+    shifted_dataset = [(image, label) for image, label in zip(shifted_images, labels)]
+    
+    return shifted_dataset    
+
+
+# Define a wrapper to replace inputs with ground truth images
+class TrivialDataset(torch.utils.data.Dataset):
+  # dataset = TrivialDataset(dataset) will substitute all the input images in dataset with 
+  # the corresponding ground truth
+    def __init__(self, original_dataset):
+        self.original_dataset = original_dataset
+
+    def __len__(self):
+        return len(self.original_dataset)
+
+    def __getitem__(self, idx):
+        input_image, ground_truth = self.original_dataset[idx]
+        # Replace the input image with the ground truth image
+        return ground_truth, ground_truth
+
+
+
 
 if __name__ == "__main__":
   # Fix the randomness
@@ -217,9 +398,9 @@ if __name__ == "__main__":
   if wandb.config["dataset"] == "CIFAR10":
     if wandb.config["model"] == "ResNet18":
       trunk = torchvision.models.resnet18(num_classes=wandb.config["num_classes"])
-  if wandb.config["model"] == "UNet":
-      trunk = UNet(wandb.config["num_inputs"],1)
-
+  if (wandb.config["model"] == "UNet") or (wandb.config["model"] == "trivialModel"): 
+    trunk = UNet(wandb.config["num_inputs"],1)
+  
   # ADD LAST LAYER OF MODEL
   model = add_uncertainty(trunk, params)
 
@@ -243,7 +424,7 @@ if __name__ == "__main__":
     
     num_calib_length = wandb.config["num_calib_img"]
     num_val_img =  wandb.config["num_val_img"]
-    if wandb.config["condConf_testing_mode"]: 
+    if wandb.config["condConf_testing_mode"]:
        print("condConf testing mode is ON.")
        
        if len(calib_dataset) > num_calib_length:
@@ -256,6 +437,15 @@ if __name__ == "__main__":
         print(f"    Use (at most) {num_val_img} data points for val & image generations.")
         val_indices = np.random.choice(len(val_dataset), size=num_val_img, replace=False)
         val_dataset = torch.utils.data.Subset(val_dataset, val_indices)
+        
+    if wandb.config["model"] == "trivialModel":
+      print(f"    Using trivial base model")
+      calib_dataset = TrivialDataset(calib_dataset)
+      val_dataset = TrivialDataset(val_dataset)
+    if config['testing_by_shifting'] == "shift":
+      print(f"    Applying random shift to input images")
+      calib_dataset = random_shift_input_images_by_padding(calib_dataset) # random_shift_input_images()
+      val_dataset = random_shift_input_images_by_padding(val_dataset)  # random_shift_input_images()
 
 
   model = train_net(model,
@@ -325,7 +515,8 @@ if __name__ == "__main__":
         lambdas = torch.linspace(wandb.config['minimum_lambda_softmax'], wandb.config['maximum_lambda_softmax'], config['num_lambdas'])
       else:
         lambdas = torch.linspace(wandb.config['minimum_lambda'], wandb.config['maximum_lambda'], wandb.config['num_lambdas'])
-      raw_images_dict = get_images_condConf_parallel(model,val_dataset,wandb.config['device'],list(range(wandb.config['num_val_img'])),params,lambdas,condConf)
+      #raw_images_dict = get_images_condConf_parallel(model,val_dataset,wandb.config['device'],list(range(wandb.config['num_val_img'])),params,lambdas,condConf)
+      raw_images_dict = get_images_condConf_non_parallel(model,val_dataset,wandb.config['device'],list(range(wandb.config['num_val_img'])),params,lambdas,condConf)
       CP_raw_image_dict = get_images(model,
                                      val_dataset,
                                      wandb.config['device'],
